@@ -218,3 +218,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Evalry product plans and roadmap (never commit)
+*Enterprise Platform Plan*.md
+docs-internal/
+CLAUDE.md

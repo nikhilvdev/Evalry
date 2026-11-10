@@ -1,0 +1,31 @@
+[project]
+name = "evalry"
+version = "0.1.0.dev0"
+description = "Evaluate AI-generated code, eval datasets and the evals themselves."
+authors = [
+    { name = "Nikhil Arora", email = "nikhil290192@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "logquill>=3.0.0",
+    "pydantic>=2.14.3",
+    "pyyaml>=6.0.3",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+    "types-pyyaml>=6.0.12.20261103",
+]
+
+[tool.ruff]
+line-length = 110
+
+[tool.mypy]
+strict = true
