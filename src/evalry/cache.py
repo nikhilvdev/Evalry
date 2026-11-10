@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from evalry.graders import PYTHON_TESTS_VERSION
+from evalry.graders import DEFAULT_ISOLATION, PYTHON_TESTS_VERSION, Isolation
 from evalry.log import get_logger
 from evalry.runner import PYTHON_IMAGE, SEED
 from evalry.schemas import GraderScore, Task
@@ -26,8 +26,8 @@ class GradeCache:
         self.misses = 0
 
     @staticmethod
-    def key(task: Task, code: str) -> str:
-        parts = [PYTHON_TESTS_VERSION, PYTHON_IMAGE, SEED, task.tests, code]
+    def key(task: Task, code: str, isolation: Isolation = DEFAULT_ISOLATION) -> str:
+        parts = [PYTHON_TESTS_VERSION, PYTHON_IMAGE, SEED, isolation, task.tests, code]
         return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
     def get(self, key: str) -> tuple[GraderScore, bool] | None:

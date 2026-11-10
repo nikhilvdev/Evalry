@@ -8,11 +8,14 @@ from pathlib import Path
 from logquill import bind_context
 from pydantic import BaseModel
 
+from evalry.audit import AuditLog
 from evalry.cache import GradeCache
-from evalry.engine import run_sample
 from evalry.generation import Generator
-from evalry.schemas import RunRecord, SampleResult, Task, load_task
+from evalry.graders import DEFAULT_ISOLATION, Isolation
+from evalry.jobs import JobQueue, ProjectLimits
+from evalry.schemas import RunRecord, Task, load_task
 from evalry.scoring import TaskStats, pass_at_k, task_stats
+from evalry.worker import collect, sandbox_executor, submit_run, work
 
 
 class TaskSummary(BaseModel):
@@ -34,25 +37,42 @@ def load_suite(directory: Path) -> list[Task]:
 
 def run_suite(
     tasks: list[Task],
-    make_generator: Callable[[Task], Generator],
+    make_generator: Callable[[Task, int], Generator],
     *,
     samples: int,
     suite_version: str,
     timeout_s: float = 10,
     cache: GradeCache | None = None,
+    isolation: Isolation = DEFAULT_ISOLATION,
+    project_id: str = "local",
+    generator_hash: str = "local",
+    budget_usd: float = float("inf"),
+    audit: AuditLog | None = None,
+    actor: str = "local",
 ) -> RunRecord:
-    """Sequential on purpose: parallel, resumable, idempotent jobs are the phase 2 scheduler's job."""
+    """Run through the job queue so the CLI and the future API share one path: idempotent keys, retries, budget stop, audit.
+
+    shortcut: one in-process worker and an in-memory queue, so a killed process starts over. Durable resume and parallel
+    workers come with the persistent store.
+    """
     if samples < 1:
         raise ValueError("samples must be at least 1.")
     run_id = uuid.uuid4().hex
-    results: list[SampleResult] = []
     started = datetime.now(UTC)
+    queue = JobQueue({project_id: ProjectLimits(budget_usd=budget_usd)})
     # Every log record under this block carries run_id and suite_version (CLAUDE.md logging rules).
     with bind_context(run_id=run_id, suite_version=suite_version):
-        for task in tasks:
-            gen = make_generator(task)
-            results += [run_sample(task, gen, i, timeout_s=timeout_s, cache=cache) for i in range(samples)]
-    return RunRecord(run_id=run_id, suite_version=suite_version, started_at=started, results=results)
+        jobs = submit_run(
+            queue, tasks, project_id=project_id, suite_version=suite_version, generator_hash=generator_hash,
+            samples=samples, audit=audit, actor=actor,
+        )  # fmt: skip
+        work(
+            queue,
+            {t.id: t for t in tasks},
+            sandbox_executor(make_generator, timeout_s=timeout_s, cache=cache, isolation=isolation),
+            audit=audit,
+        )
+        return collect(queue, jobs, run_id=run_id, suite_version=suite_version, started_at=started)
 
 
 def summarize(record: RunRecord, k: int = 1) -> dict[str, TaskSummary]:

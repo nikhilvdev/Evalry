@@ -52,6 +52,10 @@ class SampleResult(_Strict):
     seed: int | None = Field(
         default=None, description="Interpreter hash seed; same code + seed + image = same score."
     )
+    isolation: Literal["rpc", "inprocess"] | None = Field(
+        default=None,
+        description="rpc: tests ran in a separate container; inprocess: same process (advisory only).",
+    )
     dataset_version: str | None = None
     judge_version: str | None = None
 

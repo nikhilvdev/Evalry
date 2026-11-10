@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,9 +18,9 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     seen: list[str] = []
     real = evalry.graders.python_tests
 
-    def counting(task: Task, code: str, *, timeout_s: float = 10) -> tuple[GraderScore, bool]:
+    def counting(task: Task, code: str, **kw: Any) -> tuple[GraderScore, bool]:
         seen.append(code)
-        return real(task, code, timeout_s=timeout_s)
+        return real(task, code, **kw)
 
     monkeypatch.setattr("evalry.engine.python_tests", counting)
     return seen

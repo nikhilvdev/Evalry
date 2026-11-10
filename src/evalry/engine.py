@@ -4,7 +4,7 @@ import hashlib
 
 from evalry.cache import GradeCache
 from evalry.generation import Generator, extract_code, generate_logged
-from evalry.graders import python_tests
+from evalry.graders import DEFAULT_ISOLATION, Isolation, python_tests
 from evalry.runner import PYTHON_IMAGE, SEED
 from evalry.schemas import SampleResult, Task
 from evalry.scoring import composite
@@ -15,6 +15,7 @@ def grade(
     code: str,
     *,
     timeout_s: float = 10,
+    isolation: Isolation = DEFAULT_ISOLATION,
     generator_model: str = "local-file",
     sample: int = 0,
     cost_usd: float = 0,
@@ -25,11 +26,11 @@ def grade(
         raise ValueError(
             f"Task {task.id!r} is {task.language}; only python is supported. Add a language profile first."
         )
-    key = GradeCache.key(task, code)
+    key = GradeCache.key(task, code, isolation)
     if cache and (hit := cache.get(key)):
         score, hard_fail = hit
     else:
-        score, hard_fail = python_tests(task, code, timeout_s=timeout_s)
+        score, hard_fail = python_tests(task, code, timeout_s=timeout_s, isolation=isolation)
         # A timeout depends on machine load, not just inputs, so it is never cached.
         if cache and not hard_fail:
             cache.put(key, score, hard_fail)
@@ -43,12 +44,19 @@ def grade(
         composite=composite([score], {}, hard_fail=hard_fail),
         cost_usd=cost_usd,
         image=PYTHON_IMAGE,
+        isolation=isolation,
         seed=SEED,
     )
 
 
 def run_sample(
-    task: Task, generator: Generator, sample: int, *, timeout_s: float = 10, cache: GradeCache | None = None
+    task: Task,
+    generator: Generator,
+    sample: int,
+    *,
+    timeout_s: float = 10,
+    cache: GradeCache | None = None,
+    isolation: Isolation = DEFAULT_ISOLATION,
 ) -> SampleResult:
     """Generate (prompt only, never the tests), extract the code, grade it."""
     out = generate_logged(generator, task.prompt, sample=sample)
@@ -56,6 +64,7 @@ def run_sample(
         task,
         extract_code(out.text),
         timeout_s=timeout_s,
+        isolation=isolation,
         generator_model=out.model,
         sample=sample,
         cost_usd=out.cost_usd,

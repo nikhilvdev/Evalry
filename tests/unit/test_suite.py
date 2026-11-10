@@ -27,7 +27,9 @@ def test_load_suite_sorted_and_rejects_empty_or_duplicates(tmp_path: Path) -> No
 
 def test_run_suite_n_samples_and_summary() -> None:
     replies = {"fizzbuzz": [GOOD, BAD, GOOD], "double": [DOUBLE] * 3}
-    rec = run_suite(load_suite(SUITE), lambda t: FakeGenerator(replies[t.id]), samples=3, suite_version="s1")
+    rec = run_suite(
+        load_suite(SUITE), lambda t, i: FakeGenerator([replies[t.id][i]]), samples=3, suite_version="s1"
+    )
     assert len(rec.results) == 6 and rec.suite_version == "s1"
     assert sorted((r.task_id, r.sample) for r in rec.results)[:3] == [
         ("double", 0),
@@ -46,7 +48,7 @@ def test_run_suite_rejects_zero_samples() -> None:
     with pytest.raises(ValueError):
         run_suite(
             [Task(id="a", language="python", prompt="p", tests="t")],
-            lambda t: FakeGenerator([]),
+            lambda t, i: FakeGenerator([]),
             samples=0,
             suite_version="s",
         )
@@ -89,6 +91,34 @@ def test_cli_suite_estimate_and_budget_stop(tmp_path: Path, capsys: pytest.Captu
 
 
 def test_log_records_carry_run_context(capfd: pytest.CaptureFixture[str]) -> None:
-    run_suite(load_suite(SUITE)[:1], lambda t: FakeGenerator([DOUBLE]), samples=1, suite_version="ctx-suite")
+    run_suite(
+        load_suite(SUITE)[:1], lambda t, i: FakeGenerator([DOUBLE]), samples=1, suite_version="ctx-suite"
+    )
     out = capfd.readouterr().out
     assert '"suite_version":"ctx-suite"' in out and '"run_id":' in out
+
+
+def test_cli_suite_audit_log_and_budget(tmp_path: Path) -> None:
+    replies = tmp_path / "r.json"
+    replies.write_text(json.dumps({"fizzbuzz": [GOOD], "double": [DOUBLE]}))
+    audit = tmp_path / "audit.jsonl"
+    args = [
+        "suite",
+        str(SUITE),
+        "--replies",
+        str(replies),
+        "--audit-log",
+        str(audit),
+        "--actor",
+        "alice",
+        "--project",
+        "pilot",
+    ]
+    assert main(args) == 0
+    from evalry.audit import AuditLog
+
+    log = AuditLog(audit)
+    actions = [e.action for e in log.events()]
+    assert actions == ["run.submitted", "job.completed", "job.completed"] and log.verify() == []
+    assert {e.actor for e in log.events() if e.action == "run.submitted"} == {"alice"}
+    assert {e.project_id for e in log.events()} == {"pilot"}
