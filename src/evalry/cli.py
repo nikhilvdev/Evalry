@@ -10,12 +10,14 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+import psycopg
 import yaml
 
 from evalry.audit import AuditLog
 from evalry.cache import GradeCache
 from evalry.compare import min_samples, paired_bootstrap, regression_gate, task_means
 from evalry.cost import Rates, check_budget, estimate
+from evalry.db import MigrationError, migrate
 from evalry.engine import grade
 from evalry.gates import GateException, HardGateRule, decide
 from evalry.generation import FakeGenerator
@@ -55,6 +57,12 @@ def main(argv: list[str] | None = None) -> int:
     suite.add_argument(
         "--isolation", choices=["rpc", "inprocess"], default=DEFAULT_ISOLATION, help=ISOLATION_HELP
     )
+    suite.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="jobs in flight at once; each rpc sample runs two containers (~512 MB)",
+    )
     suite.add_argument("--project", default="local", help="project id for limits, budget and audit")
     suite.add_argument(
         "--actor", default=getpass.getuser(), help="who is running this, recorded in the audit log"
@@ -84,6 +92,18 @@ def main(argv: list[str] | None = None) -> int:
     cmp.add_argument(
         "--threshold", type=float, default=0.05, help="regression gate: block if the CI is below minus this"
     )
+    boot = sub.add_parser(
+        "bootstrap-tenant",
+        help="create a tenant and its first admin (operator action; needs the database admin DSN)",
+    )
+    boot.add_argument("tenant_id")
+    boot.add_argument(
+        "admin_subject", help="the identity-provider subject that becomes the tenant's first admin"
+    )
+    boot.add_argument("--operator", default=getpass.getuser())
+    sub.add_parser(
+        "migrate", help="apply database migrations; reads the admin connection string from EVALRY_ADMIN_DSN"
+    )
     gate = sub.add_parser(
         "gate", help="hard gate: decide pass/block for a run record and record the decision"
     )
@@ -96,6 +116,10 @@ def main(argv: list[str] | None = None) -> int:
     gate.add_argument("--audit-log", type=Path, required=True)
     gate.add_argument("--out", type=Path, help="write the signed decision JSON here")
     args = ap.parse_args(argv)
+    if args.cmd == "migrate":
+        return _migrate()
+    if args.cmd == "bootstrap-tenant":
+        return _bootstrap(args)
     if args.cmd == "gate":
         return _gate(args)
     if args.cmd == "compare":
@@ -159,6 +183,7 @@ def _suite(args: argparse.Namespace) -> int:
             timeout_s=args.timeout,
             cache=cache,
             isolation=args.isolation,
+            workers=args.workers,
             project_id=args.project,
             generator_hash=hashlib.sha256(args.replies.read_bytes()).hexdigest(),
             budget_usd=args.budget if args.budget is not None else float("inf"),
@@ -177,6 +202,35 @@ def _suite(args: argparse.Namespace) -> int:
         print(
             f"{tid}: mean={t.stats.mean:.2f} min={t.stats.min:.2f} max={t.stats.max:.2f} std={t.stats.std:.2f} pass@{args.k}={p}"
         )
+    return 0
+
+
+def _migrate() -> int:
+    """Exit 0 = up to date, 2 = cannot migrate. The DSN holds a password, so it comes from the environment, not a flag."""
+    dsn = os.environ.get("EVALRY_ADMIN_DSN")
+    if not dsn:
+        print("error: set EVALRY_ADMIN_DSN to the schema owner's connection string.", file=sys.stderr)
+        return 2
+    try:
+        applied = migrate(dsn)
+    except (MigrationError, psycopg.Error) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    print("applied: " + ", ".join(applied) if applied else "database is up to date")
+    return 0
+
+
+def _bootstrap(args: argparse.Namespace) -> int:
+    """Exit 0 = created, 2 = refused. Uses the same environment variables as the server."""
+    from evalry.access import Conflict
+    from evalry.api.server import ConfigError, bootstrap_tenant, load_settings
+
+    try:
+        bootstrap_tenant(load_settings(os.environ), args.tenant_id, args.admin_subject, args.operator)
+    except (ConfigError, Conflict, psycopg.Error) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    print(f"tenant {args.tenant_id!r} created with admin {args.admin_subject!r}")
     return 0
 
 

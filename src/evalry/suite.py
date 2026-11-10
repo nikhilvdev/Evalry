@@ -44,7 +44,9 @@ def run_suite(
     timeout_s: float = 10,
     cache: GradeCache | None = None,
     isolation: Isolation = DEFAULT_ISOLATION,
+    workers: int = 1,
     project_id: str = "local",
+    tenant_id: str = "local",
     generator_hash: str = "local",
     budget_usd: float = float("inf"),
     audit: AuditLog | None = None,
@@ -59,18 +61,19 @@ def run_suite(
         raise ValueError("samples must be at least 1.")
     run_id = uuid.uuid4().hex
     started = datetime.now(UTC)
-    queue = JobQueue({project_id: ProjectLimits(budget_usd=budget_usd)})
+    queue = JobQueue({(tenant_id, project_id): ProjectLimits(budget_usd=budget_usd, max_concurrent=workers)})
     # Every log record under this block carries run_id and suite_version (CLAUDE.md logging rules).
     with bind_context(run_id=run_id, suite_version=suite_version):
         jobs = submit_run(
             queue, tasks, project_id=project_id, suite_version=suite_version, generator_hash=generator_hash,
-            samples=samples, audit=audit, actor=actor,
+            samples=samples, audit=audit, actor=actor, tenant_id=tenant_id,
         )  # fmt: skip
         work(
             queue,
             {t.id: t for t in tasks},
             sandbox_executor(make_generator, timeout_s=timeout_s, cache=cache, isolation=isolation),
             audit=audit,
+            workers=workers,
         )
         return collect(queue, jobs, run_id=run_id, suite_version=suite_version, started_at=started)
 

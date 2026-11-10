@@ -70,7 +70,7 @@ def test_priority_then_fifo() -> None:
 
 
 def test_per_project_concurrency_limit() -> None:
-    q = JobQueue({"a": ProjectLimits(max_concurrent=1)})
+    q = JobQueue({("local", "a"): ProjectLimits(max_concurrent=1)})
     for j in [job("a1", project="a"), job("a2", project="a"), job("b1", project="b")]:
         q.submit(j)
     first, second = q.claim(), q.claim()
@@ -92,7 +92,7 @@ def test_retry_then_fail() -> None:
 
 
 def test_budget_stops_new_work_but_not_other_projects() -> None:
-    q = JobQueue({"a": ProjectLimits(budget_usd=1.0)})
+    q = JobQueue({("local", "a"): ProjectLimits(budget_usd=1.0)})
     for j in [job("a1", project="a"), job("a2", project="a"), job("b1", project="b")]:
         q.submit(j)
     a1 = q.claim()

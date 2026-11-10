@@ -95,7 +95,7 @@ def test_failing_task_retries_then_fails_and_collect_refuses() -> None:
 
 
 def test_budget_stops_the_run_midway() -> None:
-    q = JobQueue({"p": ProjectLimits(budget_usd=2.0)})
+    q = JobQueue({("local", "p"): ProjectLimits(budget_usd=2.0)})
     jobs = submit(q, samples=1)
     ex = Counting()
     assert work(q, BY_ID, ex) == 2  # $1 each; the third job is held back

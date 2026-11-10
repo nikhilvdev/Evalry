@@ -1,17 +1,19 @@
 """Append-only, hash-chained audit log (plan §8, §9).
 
 Every run, job and decision is recorded with who did it, what, to what, and when. Each event carries the hash of the one
-before it, so editing or deleting a line breaks every hash after it. shortcut: a local JSONL file stands in for the
-append-only Postgres/object store (system of record, phase 2 storage work). Events are also mirrored to LogQuill with
-``TamperEvidentPlugin`` as a second, independent check.
+before it, so editing or deleting a line breaks every hash after it. Events live in a sink: a local JSONL file (one chain,
+for local mode and tests) or PostgreSQL (one chain per tenant, see ``evalry.pgstore``). Events are also mirrored to LogQuill
+with ``TamperEvidentPlugin`` as a second, independent check.
 """
 
 import hashlib
 import json
 import os
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 from logquill import TamperEvidentPlugin
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -45,17 +47,29 @@ def _digest(event: AuditEvent) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-class AuditLog:
+class AuditSink(Protocol):
+    """Where sealed events are stored. The sink owns sequencing, so several writers cannot fork a chain."""
+
+    def append(self, tenant_id: str | None, make: Callable[[int, str], AuditEvent]) -> AuditEvent:
+        """Call ``make(seq, prev_hash)`` while holding the chain, store the event it returns, and return it."""
+        ...
+
+    def events(self, tenant_id: str | None = None) -> list[AuditEvent]: ...
+
+
+class FileSink:
+    """One chain in a local JSONL file. ``tenant_id`` is ignored: local mode has a single chain."""
+
     def __init__(self, path: Path) -> None:
         self.path = path
         self._lock = threading.Lock()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch(exist_ok=True)
-        last = self._read()[-1:] or []
+        last = self.events()[-1:]
         self._seq = last[0].seq + 1 if last else 0
         self._head = last[0].hash if last else GENESIS
 
-    def _read(self) -> list[AuditEvent]:
+    def events(self, tenant_id: str | None = None) -> list[AuditEvent]:
         try:
             return [
                 AuditEvent.model_validate_json(line) for line in self.path.read_text().splitlines() if line
@@ -64,6 +78,22 @@ class AuditLog:
             raise ValueError(
                 f"Audit log {self.path} has an unreadable line; do not append until it is investigated."
             ) from e
+
+    def append(self, tenant_id: str | None, make: Callable[[int, str], AuditEvent]) -> AuditEvent:
+        with self._lock:
+            event = make(self._seq, self._head)
+            with self.path.open("a") as f:
+                f.write(event.model_dump_json() + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            self._seq, self._head = event.seq + 1, event.hash
+            return event
+
+
+class AuditLog:
+    def __init__(self, target: Path | AuditSink) -> None:
+        self._sink: AuditSink = FileSink(target) if isinstance(target, Path) else target
+        self.path: Path | None = target if isinstance(target, Path) else None
 
     def append(
         self,
@@ -82,34 +112,32 @@ class AuditLog:
             raise ValueError(
                 f"Audit detail {too_long} is over {_MAX_DETAIL} characters. Store ids or hashes, not content."
             )
-        with self._lock:
+
+        def seal(seq: int, prev_hash: str) -> AuditEvent:
             event = AuditEvent(
-                seq=self._seq, ts=datetime.now(UTC), actor=actor, action=action, target=target, source=source,
-                tenant_id=tenant_id, project_id=project_id, details=details, prev_hash=self._head,
+                seq=seq, ts=datetime.now(UTC), actor=actor, action=action, target=target, source=source,
+                tenant_id=tenant_id, project_id=project_id, details=details, prev_hash=prev_hash,
             )  # fmt: skip
-            event = event.model_copy(update={"hash": _digest(event)})
-            with self.path.open("a") as f:
-                f.write(event.model_dump_json() + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-            self._seq, self._head = event.seq + 1, event.hash
+            return event.model_copy(update={"hash": _digest(event)})
+
+        event = self._sink.append(tenant_id, seal)
         log.info(action, actor=actor, target=target, source=source, project_id=project_id, seq=event.seq)
         log.flush()  # the mirror is written before append returns, so a crash cannot lose the last event's copy
         return event
 
-    def head(self) -> str:
-        """Latest hash. Store it somewhere the log's writers cannot reach to detect truncation."""
-        return self._head
+    def events(self, tenant_id: str | None = None) -> list[AuditEvent]:
+        return self._sink.events(tenant_id)
 
-    def events(self) -> list[AuditEvent]:
-        return self._read()
+    def head(self, tenant_id: str | None = None) -> str:
+        """Latest hash of the chain. Store it somewhere the log's writers cannot reach to detect truncation."""
+        last = self._sink.events(tenant_id)[-1:]
+        return last[0].hash if last else GENESIS
 
-    def verify(self, expected_head: str | None = None) -> list[str]:
+    def verify(self, expected_head: str | None = None, tenant_id: str | None = None) -> list[str]:
         """Problems found, empty when the chain is intact. ``expected_head`` also catches deleted trailing events."""
         problems: list[str] = []
         prev = GENESIS
-        events = self._read()
-        for i, e in enumerate(events):
+        for i, e in enumerate(self._sink.events(tenant_id)):
             if e.seq != i:
                 problems.append(f"event {i}: sequence is {e.seq}, expected {i} (event removed or reordered)")
             if e.prev_hash != prev:

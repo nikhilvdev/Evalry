@@ -37,10 +37,16 @@ class State(StrEnum):
 
 
 def job_key(
-    project_id: str, suite_version: str, task_hash: str, sample: int, stage: Stage, generator_hash: str
+    project_id: str,
+    suite_version: str,
+    task_hash: str,
+    sample: int,
+    stage: Stage,
+    generator_hash: str,
+    tenant_id: str = "local",
 ) -> str:
-    """Same inputs, same key. Anything that can change the result belongs here."""
-    parts = [project_id, suite_version, task_hash, sample, stage.value, generator_hash]
+    """Same inputs, same key. Anything that can change the result belongs here, including the tenant."""
+    parts = [tenant_id, project_id, suite_version, task_hash, sample, stage.value, generator_hash]
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
 
@@ -48,6 +54,7 @@ class Job(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     key: str
+    tenant_id: str = "local"
     project_id: str
     task_id: str
     sample: int = Field(ge=0)
@@ -68,16 +75,21 @@ class ProjectLimits(BaseModel):
 
 
 class JobQueue:
-    def __init__(self, limits: dict[str, ProjectLimits] | None = None) -> None:
+    def __init__(self, limits: dict[tuple[str, str], ProjectLimits] | None = None) -> None:
+        """``limits`` is keyed by (tenant_id, project_id); a scope without an entry gets the defaults."""
         self._jobs: dict[str, Job] = {}
         self._order: dict[str, int] = {}  # submission order, so equal priorities run FIFO
         self._seq = count()
         self._limits = limits or {}
-        self._spent: dict[str, float] = {}
+        self._spent: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
 
-    def _limit(self, project_id: str) -> ProjectLimits:
-        return self._limits.get(project_id, ProjectLimits())
+    @staticmethod
+    def _scope(job: Job) -> tuple[str, str]:
+        return (job.tenant_id, job.project_id)
+
+    def _limit(self, scope: tuple[str, str]) -> ProjectLimits:
+        return self._limits.get(scope, ProjectLimits())
 
     def submit(self, job: Job) -> Job:
         """Idempotent: an existing key returns the stored job untouched, whatever its state."""
@@ -91,19 +103,20 @@ class JobQueue:
     def claim(self) -> Job | None:
         """Next runnable job: best priority first, FIFO within it, skipping projects at their concurrency or budget limit."""
         with self._lock:
-            running: dict[str, int] = {}
+            running: dict[tuple[str, str], int] = {}
             for j in self._jobs.values():
                 if j.state is State.RUNNING:
-                    running[j.project_id] = running.get(j.project_id, 0) + 1
+                    running[self._scope(j)] = running.get(self._scope(j), 0) + 1
             queued = sorted(
                 (j for j in self._jobs.values() if j.state is State.QUEUED),
                 key=lambda j: (j.priority, self._order[j.key]),
             )
             for j in queued:
-                lim = self._limit(j.project_id)
-                if running.get(j.project_id, 0) >= lim.max_concurrent:
+                scope = self._scope(j)
+                lim = self._limit(scope)
+                if running.get(scope, 0) >= lim.max_concurrent:
                     continue
-                if self._spent.get(j.project_id, 0.0) >= lim.budget_usd:
+                if self._spent.get(scope, 0.0) >= lim.budget_usd:
                     continue
                 j.state = State.RUNNING
                 j.attempts += 1
@@ -116,7 +129,7 @@ class JobQueue:
             if j.state is State.DONE:  # a duplicate completion must not charge twice
                 return
             j.state, j.result, j.error = State.DONE, result, ""
-            self._spent[j.project_id] = self._spent.get(j.project_id, 0.0) + result.cost_usd
+            self._spent[self._scope(j)] = self._spent.get(self._scope(j), 0.0) + result.cost_usd
 
     def fail(self, key: str, error: str) -> None:
         """Requeue until ``max_attempts`` is used up, then mark failed so the run can report it."""
@@ -138,6 +151,10 @@ class JobQueue:
                 j.error = j.error or "worker died while running this job"
             return len(stuck)
 
+    def running(self) -> int:
+        with self._lock:
+            return sum(j.state is State.RUNNING for j in self._jobs.values())
+
     def jobs(self) -> list[Job]:
         with self._lock:
             return list(self._jobs.values())
@@ -146,13 +163,14 @@ class JobQueue:
         with self._lock:
             return self._jobs[key]
 
-    def spent(self, project_id: str) -> float:
+    def spent(self, project_id: str, tenant_id: str = "local") -> float:
         with self._lock:
-            return self._spent.get(project_id, 0.0)
+            return self._spent.get((tenant_id, project_id), 0.0)
 
-    def blocked_by_budget(self, project_id: str) -> list[Job]:
+    def blocked_by_budget(self, project_id: str, tenant_id: str = "local") -> list[Job]:
         """Queued jobs of a project that is at its budget: they will never run, so report them rather than wait."""
         with self._lock:
-            if self._spent.get(project_id, 0.0) < self._limit(project_id).budget_usd:
+            scope = (tenant_id, project_id)
+            if self._spent.get(scope, 0.0) < self._limit(scope).budget_usd:
                 return []
-            return [j for j in self._jobs.values() if j.project_id == project_id and j.state is State.QUEUED]
+            return [j for j in self._jobs.values() if self._scope(j) == scope and j.state is State.QUEUED]

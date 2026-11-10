@@ -65,6 +65,32 @@ def _docker_cmd(name: str, image: str, source: str) -> list[str]:
     ]  # fmt: skip
 
 
+def _kill_and_wait(*names: str, wait_s: float = 10) -> None:
+    """Kill containers and wait until Docker has really removed them, so "cleaned up" is true when the caller resumes.
+
+    ``docker kill`` returns before ``--rm`` has finished removing the container; callers that check for leftovers (or start
+    the next job against a resource limit) would otherwise race with the removal.
+    """
+    for n in names:
+        subprocess.run(["docker", "kill", n], check=False, capture_output=True)
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        left = [
+            n
+            for n in names
+            if subprocess.run(
+                ["docker", "ps", "-aq", "--filter", f"name=^{n}$"],
+                check=False,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        ]
+        if not left:
+            return
+        time.sleep(0.05)
+    log.warn("container still present after kill", containers=",".join(names))  # noqa: G010 (LogQuill API)
+
+
 def run_python_tests(
     code: str, tests: str, *, timeout_s: float = 10, image: str = PYTHON_IMAGE
 ) -> SandboxResult:
@@ -78,7 +104,7 @@ def run_python_tests(
         )
     except subprocess.TimeoutExpired:
         # The docker client dying does not stop the container, so kill it by name.
-        subprocess.run(["docker", "kill", name], check=False, capture_output=True)
+        _kill_and_wait(name)
         log.warn("sandbox timeout", container=name, timeout_s=timeout_s)  # noqa: G010 (LogQuill API)
         return SandboxResult(-1, "", "", True)
     return SandboxResult(done.returncode, done.stdout[:_MAX_OUTPUT], done.stderr[:_MAX_OUTPUT], False)
@@ -172,9 +198,10 @@ def run_python_tests_rpc(
     while t.poll() is None and not stop.is_set() and time.monotonic() < deadline:
         stop.wait(0.02)
     timed_out = t.poll() is None and not violation
-    for k in ("s", "t"):  # the run is over: never leave either container behind
-        if procs[k].poll() is None:
-            subprocess.run(["docker", "kill", names[k]], check=False, capture_output=True)
+    # The run is over: never leave either container behind.
+    still_running = [names[k] for k in ("s", "t") if procs[k].poll() is None]
+    if still_running:
+        _kill_and_wait(*still_running)
     for p in procs.values():
         try:
             p.wait(timeout=2)

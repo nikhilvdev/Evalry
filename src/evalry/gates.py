@@ -92,6 +92,7 @@ def decide(
     environment: Environment,
     project_id: str,
     key: bytes | None,
+    tenant_id: str | None = None,
     audit: AuditLog,
     exceptions: list[GateException] | None = None,
     now: datetime | None = None,
@@ -166,6 +167,7 @@ def decide(
         action,
         f"{project_id}/{rule.name}",
         source="gate",
+        tenant_id=tenant_id,
         project_id=project_id,
         details={
             "decision_id": decision.decision_id,
@@ -181,6 +183,7 @@ def decide(
             "gate.exception.applied",
             f"{project_id}/{rule.name}/{e.task_id}",
             source="gate",
+            tenant_id=tenant_id,
             project_id=project_id,
             details={
                 "decision_id": decision.decision_id,

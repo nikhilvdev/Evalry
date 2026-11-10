@@ -1,7 +1,11 @@
 """Worker loop and run submission on top of the job queue (plan §7)."""
 
+import contextvars
 import hashlib
+import threading
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from evalry.audit import AuditLog
@@ -33,6 +37,7 @@ def submit_run(
     priority: Priority = Priority.NIGHTLY,
     audit: AuditLog | None = None,
     actor: str = "unknown",
+    tenant_id: str = "local",
 ) -> list[Job]:
     """Enqueue task x sample jobs. Safe to call again for the same run: existing keys are returned, not duplicated."""
     if audit:
@@ -41,13 +46,17 @@ def submit_run(
             "run.submitted",
             f"{project_id}/{suite_version}",
             source="worker",
+            tenant_id=tenant_id if tenant_id != "local" else None,
             project_id=project_id,
             details={"tasks": str(len(tasks)), "samples": str(samples), "priority": priority.name},
         )
     return [
         queue.submit(
             Job(
-                key=job_key(project_id, suite_version, task_hash(t), i, Stage.GRADE, generator_hash),
+                key=job_key(
+                    project_id, suite_version, task_hash(t), i, Stage.GRADE, generator_hash, tenant_id
+                ),
+                tenant_id=tenant_id,
                 project_id=project_id,
                 task_id=t.id,
                 sample=i,
@@ -88,29 +97,46 @@ def _audit(audit: AuditLog | None, job: Job, action: str, details: dict[str, str
             action,
             job.key,
             source="worker",
+            tenant_id=job.tenant_id if job.tenant_id != "local" else None,
             project_id=job.project_id,
             details={"task_id": job.task_id, **details},
         )
 
 
-def work(
-    queue: JobQueue,
-    tasks: dict[str, Task],
-    execute: Executor,
-    *,
-    max_jobs: int | None = None,
-    audit: AuditLog | None = None,
-) -> int:
-    """Claim and run jobs until none are runnable (or ``max_jobs``). Returns jobs executed.
+class _Budget:
+    """Shared ``max_jobs`` allowance across worker threads."""
 
-    Only ``Exception`` is caught: a job that raises is retried or failed by the queue. A hard stop (KeyboardInterrupt,
-    process kill) leaves the job RUNNING on purpose; ``JobQueue.recover`` requeues it on the next start.
-    """
+    def __init__(self, total: int | None) -> None:
+        self._left = total
+        self._lock = threading.Lock()
+
+    def take(self) -> bool:
+        with self._lock:
+            if self._left is None:
+                return True
+            if self._left <= 0:
+                return False
+            self._left -= 1
+            return True
+
+    def give_back(self) -> None:
+        with self._lock:
+            if self._left is not None:
+                self._left += 1
+
+
+def _loop(
+    queue: JobQueue, tasks: dict[str, Task], execute: Executor, audit: AuditLog | None, limit: _Budget
+) -> int:
     done = 0
-    while max_jobs is None or done < max_jobs:
+    while limit.take():
         job = queue.claim()
         if job is None:
-            break
+            limit.give_back()
+            if queue.running() == 0:
+                break  # nothing runnable and nothing in flight that could requeue: the run is as done as it gets
+            time.sleep(0.02)
+            continue
         try:
             result = execute(job, tasks[job.task_id])
         except Exception as e:  # noqa: BLE001 (any job error must be recorded, not crash the worker)
@@ -133,6 +159,37 @@ def work(
             )
         done += 1
     return done
+
+
+def work(
+    queue: JobQueue,
+    tasks: dict[str, Task],
+    execute: Executor,
+    *,
+    max_jobs: int | None = None,
+    audit: AuditLog | None = None,
+    workers: int = 1,
+) -> int:
+    """Claim and run jobs until none are runnable (or ``max_jobs``). Returns jobs executed.
+
+    ``workers`` threads share the queue; the queue's per-project concurrency limit still caps how many run at once, so more
+    workers than the limit just wait. Threads suffice because each job spends its time waiting on a Docker subprocess.
+
+    Only ``Exception`` is caught: a job that raises is retried or failed by the queue. A hard stop (KeyboardInterrupt,
+    process kill) leaves the job RUNNING on purpose; ``JobQueue.recover`` requeues it on the next start.
+    """
+    if workers < 1:
+        raise ValueError("workers must be at least 1.")
+    limit = _Budget(max_jobs)
+    if workers == 1:
+        return _loop(queue, tasks, execute, audit, limit)
+    # Threads do not inherit contextvars, so each gets its own copy: log records keep run_id and suite_version.
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="evalry-worker") as pool:
+        futures = [
+            pool.submit(contextvars.copy_context().run, _loop, queue, tasks, execute, audit, limit)
+            for _ in range(workers)
+        ]
+        return sum(f.result() for f in futures)
 
 
 def collect(

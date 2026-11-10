@@ -1,0 +1,358 @@
+import base64
+import hashlib
+import hmac
+import json
+import time
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import jwt
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi.testclient import TestClient
+
+from evalry.access import Store
+from evalry.api.app import create_app
+from evalry.api.auth import StaticKeys, TokenVerifier
+from evalry.audit import AuditLog
+from evalry.schemas import GraderScore, RunRecord, SampleResult
+
+ISS, AUD = "https://issuer.test", "evalry-api"
+NOW = datetime(2026, 11, 10, tzinfo=UTC)
+RULE = {"name": "smoke", "suite_version": "s1", "grader_version": "2"}
+
+
+@pytest.fixture(scope="module")
+def keypair() -> tuple[Any, Any]:
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return private, private.public_key()
+
+
+def make_token(private: Any, sub: str = "u", tenant: str | None = "acme", **over: Any) -> str:
+    claims: dict[str, Any] = {"sub": sub, "iss": ISS, "aud": AUD, "exp": int(time.time()) + 300}
+    if tenant is not None:
+        claims["tenant_id"] = tenant
+    claims.update(over)
+    claims = {k: v for k, v in claims.items() if v is not None}
+    return jwt.encode(claims, private, algorithm="RS256")
+
+
+class Env:
+    def __init__(self, tmp_path: Path, keys: tuple[Any, Any]) -> None:
+        self.private, public = keys
+        self.audit = AuditLog(tmp_path / "audit.jsonl")
+        self.store = Store(self.audit)
+        verifier = TokenVerifier(issuer=ISS, audience=AUD, keys=StaticKeys(public))
+        self.app = create_app(
+            store=self.store, audit=self.audit, verifier=verifier, environment="staging", gate_key=b"k"
+        )
+        self.client = TestClient(self.app)
+        for t in ("acme", "globex"):
+            self.store.bootstrap_tenant(t, f"{t}-admin", operator="ops")
+
+    def h(self, sub: str, tenant: str = "acme") -> dict[str, str]:
+        return {"Authorization": f"Bearer {make_token(self.private, sub, tenant)}"}
+
+    def setup_project(self, tenant: str = "acme") -> None:
+        assert (
+            self.client.post(
+                "/v1/projects", json={"project_id": "app"}, headers=self.h(f"{tenant}-admin", tenant)
+            ).status_code
+            == 201
+        )
+        for role in ("viewer", "author", "approver"):
+            r = self.client.put(
+                f"/v1/projects/app/members/{tenant}-{role}",
+                json={"role": role},
+                headers=self.h(f"{tenant}-admin", tenant),
+            )
+            assert r.status_code == 204
+
+
+@pytest.fixture
+def env(tmp_path: Path, keypair: tuple[Any, Any]) -> Iterator[Env]:
+    yield Env(tmp_path, keypair)
+
+
+def run_json(run_id: str = "r1", isolation: str = "rpc", score: float = 1.0) -> dict[str, Any]:
+    rec = RunRecord(
+        run_id=run_id, suite_version="s1", started_at=NOW,
+        results=[SampleResult(
+            task_id="fizzbuzz", task_hash="h", sample=0, generator_model="m", code="c", composite=score,
+            scores=[GraderScore(grader="tests", grader_version="2", score=score)], isolation=isolation,  # type: ignore[arg-type]
+        )],
+    )  # fmt: skip
+    return rec.model_dump(mode="json")
+
+
+# -- authentication ------------------------------------------------------------------------------------------------------
+
+
+def test_health_is_open_and_everything_else_needs_a_token(env: Env) -> None:
+    assert env.client.get("/healthz").json() == {"status": "ok"}
+    for method, path in [
+        ("get", "/v1/projects/app/runs"),
+        ("post", "/v1/projects"),
+        ("get", "/v1/projects/app/runs/r1"),
+    ]:
+        r = getattr(env.client, method)(path)
+        assert r.status_code == 401 and r.headers["WWW-Authenticate"] == "Bearer"
+
+
+def forge(header: dict[str, str], secret: bytes | None) -> str:
+    """Hand-build a JWT, because PyJWT refuses to sign with a public key or with alg=none (which is exactly the attack)."""
+
+    def b64(b: bytes) -> str:
+        return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+    payload = {"sub": "u", "iss": ISS, "aud": AUD, "exp": int(time.time()) + 300, "tenant_id": "acme"}
+    head = b64(json.dumps(header).encode()) + "." + b64(json.dumps(payload).encode())
+    sig = b"" if secret is None else hmac.new(secret, head.encode(), hashlib.sha256).digest()
+    return head + "." + b64(sig)
+
+
+def bad_tokens(private: Any, public: Any) -> dict[str, str]:
+    other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = public.public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return {
+        "expired": make_token(private, exp=int(time.time()) - 3600),
+        "wrong audience": make_token(private, aud="someone-else"),
+        "wrong issuer": make_token(private, iss="https://evil.test"),
+        "signed by another key": make_token(other),
+        "no tenant claim": make_token(private, tenant=None),
+        "empty tenant claim": make_token(private, tenant=""),
+        "no subject": make_token(private, sub=None),  # type: ignore[arg-type]
+        "no expiry": make_token(private, exp=None),
+        "alg none": forge({"alg": "none", "typ": "JWT"}, None),
+        "hs256 with the public key as secret": forge({"alg": "HS256", "typ": "JWT"}, pem),
+        "garbage": "not.a.jwt",
+    }  # fmt: skip
+
+
+def test_every_forged_or_invalid_token_is_rejected(env: Env, keypair: tuple[Any, Any]) -> None:
+    for name, token in bad_tokens(*keypair).items():
+        r = env.client.get("/v1/projects/app/runs", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 401, name
+        assert "invalid or expired" in r.json()["error"] or "no usable" in r.json()["error"], name
+    for header in ("Basic abc", "Bearer", "bearer ", "Token abc"):
+        assert env.client.get("/v1/projects/app/runs", headers={"Authorization": header}).status_code == 401
+
+
+def test_tenant_cannot_be_chosen_by_the_caller(env: Env) -> None:
+    env.setup_project("acme")
+    # a body or query field claiming another tenant is rejected or ignored; only the token's claim counts
+    r = env.client.post(
+        "/v1/projects", json={"project_id": "x", "tenant_id": "acme"}, headers=env.h("globex-admin", "globex")
+    )
+    assert r.status_code == 422
+    assert (
+        env.client.get(
+            "/v1/projects/app/runs?tenant_id=acme", headers=env.h("globex-admin", "globex")
+        ).status_code
+        == 404
+    )
+
+
+# -- authorisation and tenant isolation over HTTP -----------------------------------------------------------------------
+
+
+def test_project_and_member_management(env: Env) -> None:
+    env.setup_project()
+    assert (
+        env.client.post("/v1/projects", json={"project_id": "app"}, headers=env.h("acme-admin")).status_code
+        == 409
+    )
+    assert (
+        env.client.post("/v1/projects", json={"project_id": "y"}, headers=env.h("acme-approver")).status_code
+        == 403
+    )
+    assert (
+        env.client.post(
+            "/v1/projects", json={"project_id": "Bad_Name"}, headers=env.h("acme-admin")
+        ).status_code
+        == 400
+    )
+    assert (
+        env.client.put(
+            "/v1/projects/app/members/z", json={"role": "viewer"}, headers=env.h("acme-approver")
+        ).status_code
+        == 403
+    )
+    assert (
+        env.client.put(
+            "/v1/projects/app/members/z", json={"role": "root"}, headers=env.h("acme-admin")
+        ).status_code
+        == 422
+    )
+    assert (
+        env.client.delete("/v1/projects/app/members/acme-author", headers=env.h("acme-admin")).status_code
+        == 204
+    )
+    assert (
+        env.client.post("/v1/projects/app/runs", json=run_json(), headers=env.h("acme-author")).status_code
+        == 404
+    )  # no role left
+
+
+def test_roles_over_http_and_immutable_runs(env: Env) -> None:
+    env.setup_project()
+    assert (
+        env.client.post("/v1/projects/app/runs", json=run_json(), headers=env.h("acme-viewer")).status_code
+        == 403
+    )
+    r = env.client.post("/v1/projects/app/runs", json=run_json("r1"), headers=env.h("acme-author"))
+    assert r.status_code == 201 and r.json() == {"run_id": "r1"}
+    assert (
+        env.client.post(
+            "/v1/projects/app/runs", json=run_json("r1"), headers=env.h("acme-author")
+        ).status_code
+        == 409
+    )
+    assert env.client.get("/v1/projects/app/runs", headers=env.h("acme-viewer")).json() == {"run_ids": ["r1"]}
+    assert env.client.get("/v1/projects/app/runs/r1", headers=env.h("acme-viewer")).json()["run_id"] == "r1"
+    assert env.client.get("/v1/projects/app/runs/nope", headers=env.h("acme-viewer")).status_code == 404
+    bad = {**run_json("r2"), "surprise": 1}
+    assert env.client.post("/v1/projects/app/runs", json=bad, headers=env.h("acme-author")).status_code == 422
+
+
+def test_cross_tenant_requests_see_nothing_and_cannot_tell_the_difference(env: Env) -> None:
+    env.setup_project("acme")
+    env.client.post("/v1/projects/app/runs", json=run_json("secret"), headers=env.h("acme-author"))
+    for sub in ("globex-admin", "someone"):
+        for path in (
+            "/v1/projects/app/runs/secret",
+            "/v1/projects/app/runs",
+            "/v1/projects/app/decisions/d1",
+        ):
+            assert env.client.get(path, headers=env.h(sub, "globex")).status_code == 404
+        assert (
+            env.client.post(
+                "/v1/projects/app/runs", json=run_json("evil"), headers=env.h(sub, "globex")
+            ).status_code
+            == 404
+        )
+        assert (
+            env.client.post(
+                "/v1/projects/app/runs/secret/gate", json={"rule": RULE}, headers=env.h(sub, "globex")
+            ).status_code
+            == 404
+        )
+    foreign = env.client.get("/v1/projects/app/runs", headers=env.h("globex-admin", "globex"))
+    missing = env.client.get("/v1/projects/never-existed/runs", headers=env.h("globex-admin", "globex"))
+    assert foreign.status_code == missing.status_code == 404
+    assert foreign.json()["error"].replace("app", "X") == missing.json()["error"].replace(
+        "never-existed", "X"
+    )
+    assert env.client.get("/v1/projects/app/runs", headers=env.h("acme-viewer")).json() == {
+        "run_ids": ["secret"]
+    }
+
+
+def test_gate_flow_signed_decision_and_server_side_environment(env: Env) -> None:
+    env.setup_project()
+    env.client.post("/v1/projects/app/runs", json=run_json("good"), headers=env.h("acme-author"))
+    env.client.post(
+        "/v1/projects/app/runs", json=run_json("inproc", isolation="inprocess"), headers=env.h("acme-author")
+    )
+    assert (
+        env.client.post(
+            "/v1/projects/app/runs/good/gate", json={"rule": RULE}, headers=env.h("acme-author")
+        ).status_code
+        == 403
+    )
+    r = env.client.post(
+        "/v1/projects/app/runs/good/gate", json={"rule": RULE}, headers=env.h("acme-approver")
+    )
+    d = r.json()
+    assert (
+        r.status_code == 200 and d["outcome"] == "pass" and d["environment"] == "staging" and d["signature"]
+    )
+    got = env.client.get(f"/v1/projects/app/decisions/{d['decision_id']}", headers=env.h("acme-viewer"))
+    assert got.json() == d
+    blocked = env.client.post(
+        "/v1/projects/app/runs/inproc/gate", json={"rule": RULE}, headers=env.h("acme-approver")
+    ).json()
+    assert blocked["outcome"] == "block" and "rpc" in blocked["reasons"][0]
+    forged = env.client.post(
+        "/v1/projects/app/runs/good/gate",
+        json={"rule": RULE, "environment": "production"},
+        headers=env.h("acme-approver"),
+    )
+    assert forged.status_code == 422  # the caller cannot pick the environment or bring a key
+    assert [e.action for e in env.audit.events() if e.action.startswith("gate.")] == [
+        "gate.rehearsed",
+        "gate.rehearsed",
+    ]
+
+
+def test_gate_exception_needs_an_approver(env: Env) -> None:
+    env.setup_project()
+    env.client.post(
+        "/v1/projects/app/runs", json=run_json("failing", score=0.0), headers=env.h("acme-author")
+    )
+    exc = {
+        "task_id": "fizzbuzz",
+        "approver": "acme-viewer",
+        "reason": "flake",
+        "expires_at": "2099-01-01T00:00:00Z",
+    }
+    r = env.client.post(
+        "/v1/projects/app/runs/failing/gate",
+        json={"rule": RULE, "exceptions": [exc]},
+        headers=env.h("acme-approver"),
+    )
+    assert r.status_code == 403 and "approver role" in r.json()["error"]
+
+
+# -- operations ---------------------------------------------------------------------------------------------------------
+
+
+def test_production_without_a_key_refuses_to_start(tmp_path: Path, keypair: tuple[Any, Any]) -> None:
+    audit = AuditLog(tmp_path / "a.jsonl")
+    with pytest.raises(ValueError, match="signing key"):
+        create_app(
+            store=Store(audit),
+            audit=audit,
+            verifier=TokenVerifier(issuer=ISS, audience=AUD, keys=StaticKeys(keypair[1])),
+            environment="production",
+            gate_key=None,
+        )
+
+
+def test_oversized_body_is_refused_and_request_id_is_returned(env: Env) -> None:
+    env.setup_project()
+    r = env.client.post(
+        "/v1/projects/app/runs",
+        content=b"x" * 10,
+        headers={
+            **env.h("acme-author"),
+            "Content-Length": str(6 * 1024 * 1024),
+            "Content-Type": "application/json",
+        },
+    )
+    assert r.status_code == 413
+    assert len(env.client.get("/healthz").headers["X-Request-ID"]) == 32
+
+
+def test_logs_have_route_tenant_actor_and_never_the_token_or_ids(
+    env: Env, capfd: pytest.CaptureFixture[str]
+) -> None:
+    env.setup_project()
+    token_header = env.h("acme-viewer")
+    env.client.get("/v1/projects/app/runs/some-run-id", headers=token_header)
+    env.client.get("/v1/projects/app/runs", headers={"Authorization": "Bearer forged.token.value"})
+    out = capfd.readouterr().out
+    assert token_header["Authorization"].split()[1] not in out and "forged.token.value" not in out
+    assert '"route":"/v1/projects/{project_id}/runs/{run_id}"' in out and "some-run-id" not in out
+    assert (
+        '"tenant_id":"acme"' in out and '"actor":"acme-viewer"' in out and '"message":"token rejected"' in out
+    )
+
+
+def test_openapi_lists_versioned_routes_and_docs_are_off(env: Env) -> None:
+    paths = env.app.openapi()["paths"]
+    assert "/v1/projects/{project_id}/runs/{run_id}/gate" in paths and "/healthz" in paths
+    assert env.client.get("/docs").status_code == 404

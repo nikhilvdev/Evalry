@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -24,6 +25,7 @@ class GradeCache:
         directory.mkdir(parents=True, exist_ok=True)
         self.hits = 0
         self.misses = 0
+        self._count = threading.Lock()  # workers share one cache
 
     @staticmethod
     def key(task: Task, code: str, isolation: Isolation = DEFAULT_ISOLATION) -> str:
@@ -35,14 +37,21 @@ class GradeCache:
             raw = json.loads((self.directory / f"{key}.json").read_text())
             entry = GraderScore.model_validate(raw["score"]), bool(raw["hard_fail"])
         except FileNotFoundError:
-            self.misses += 1
+            self._bump(miss=True)
             return None
         except (OSError, ValueError, KeyError, ValidationError):
             log.warn("corrupt cache entry ignored", key=key)  # noqa: G010 (LogQuill API)
-            self.misses += 1
+            self._bump(miss=True)
             return None
-        self.hits += 1
+        self._bump(miss=False)
         return entry
+
+    def _bump(self, *, miss: bool) -> None:
+        with self._count:
+            if miss:
+                self.misses += 1
+            else:
+                self.hits += 1
 
     def put(self, key: str, score: GraderScore, hard_fail: bool) -> None:
         """Atomic write so a crash or a parallel run never leaves a half-written entry."""

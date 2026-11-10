@@ -20,6 +20,11 @@ def execute(job: Job, task: Task) -> SampleResult:
     )
 
 
+def file_of(a: AuditLog) -> Path:
+    assert a.path is not None  # these tests tamper with the local file sink directly
+    return a.path
+
+
 def make(tmp_path: Path) -> AuditLog:
     return AuditLog(tmp_path / "audit.jsonl")
 
@@ -47,17 +52,17 @@ def test_reopening_continues_the_chain(tmp_path: Path) -> None:
 def test_edit_is_detected(tmp_path: Path) -> None:
     a = make(tmp_path)
     fill(a)
-    lines = a.path.read_text().splitlines()
+    lines = file_of(a).read_text().splitlines()
     lines[1] = json.dumps({**json.loads(lines[1]), "actor": "mallory"})
-    a.path.write_text("\n".join(lines) + "\n")
+    file_of(a).write_text("\n".join(lines) + "\n")
     assert any("edited" in p for p in a.verify())
 
 
 def test_deleted_middle_event_is_detected(tmp_path: Path) -> None:
     a = make(tmp_path)
     fill(a)
-    lines = a.path.read_text().splitlines()
-    a.path.write_text("\n".join([lines[0], lines[2]]) + "\n")
+    lines = file_of(a).read_text().splitlines()
+    file_of(a).write_text("\n".join([lines[0], lines[2]]) + "\n")
     assert a.verify()
 
 
@@ -65,8 +70,8 @@ def test_truncation_needs_the_external_head(tmp_path: Path) -> None:
     a = make(tmp_path)
     fill(a)
     head = a.head()
-    lines = a.path.read_text().splitlines()
-    a.path.write_text("\n".join(lines[:2]) + "\n")
+    lines = file_of(a).read_text().splitlines()
+    file_of(a).write_text("\n".join(lines[:2]) + "\n")
     assert a.verify() == []  # a shorter chain is still self-consistent
     assert any("head" in p for p in a.verify(expected_head=head))
 

@@ -1,0 +1,22 @@
+# Local, single-host Postgres for development and the pilot's first deployment. Not a production topology: no replication,
+# no backups, no TLS. Passwords come from the environment (see deploy/.env.example); nothing secret is stored in this file.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${EVALRY_PG_ADMIN_PASSWORD:?set EVALRY_PG_ADMIN_PASSWORD}
+      EVALRY_PG_APP_PASSWORD: ${EVALRY_PG_APP_PASSWORD:?set EVALRY_PG_APP_PASSWORD}
+      POSTGRES_DB: evalry
+    ports:
+      - "127.0.0.1:5432:5432" # loopback only
+    volumes:
+      - evalry-pg:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d evalry"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  evalry-pg:
