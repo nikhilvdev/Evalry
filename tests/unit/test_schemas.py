@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from evalry.log import get_logger
-from evalry.schemas import RunRecord, Task, load_task
+from evalry.schemas import RunRecord, SampleResult, Task, load_task
 
 TASK_YAML = """
 id: fizzbuzz
@@ -37,3 +37,9 @@ def test_run_record_roundtrip() -> None:
 def test_logger_redacts_secret() -> None:
     rec = get_logger("test").info("login", password="hunter2")
     assert "hunter2" not in str(rec)
+
+
+def test_v1_record_without_reproducibility_fields_still_loads() -> None:
+    old = '{"task_id":"a","task_hash":"h","sample":0,"generator_model":"m","code":"c","scores":[],"composite":0.5}'
+    r = SampleResult.model_validate_json(old)
+    assert (r.image, r.seed, r.dataset_version, r.judge_version) == (None, None, None, None)

@@ -1,0 +1,6 @@
+id: double
+language: python
+prompt: Write double(n) returning n * 2.
+tests: |
+  assert double(2) == 4
+  assert double(0) == 0

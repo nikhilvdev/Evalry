@@ -47,6 +47,13 @@ class SampleResult(_Strict):
     scores: list[GraderScore]
     composite: float = Field(ge=0, le=1)
     cost_usd: float = Field(ge=0, default=0)
+    # Reproducibility (plan §8). Optional so records written before these existed stay valid v1 records.
+    image: str | None = Field(default=None, description="Runner image digest the grading ran in.")
+    seed: int | None = Field(
+        default=None, description="Interpreter hash seed; same code + seed + image = same score."
+    )
+    dataset_version: str | None = None
+    judge_version: str | None = None
 
 
 class RunRecord(_Strict):
