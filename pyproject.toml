@@ -1,6 +1,6 @@
 [project]
 name = "evalry"
-version = "0.1.0.dev0"
+version = "0.0.1.dev1"
 description = "Evaluate AI-generated code, eval datasets and the evals themselves."
 authors = [
     { name = "Nikhil Arora", email = "nikhil290192@gmail.com" }
