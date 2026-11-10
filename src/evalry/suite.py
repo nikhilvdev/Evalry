@@ -5,9 +5,11 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from logquill import bind_context
 from pydantic import BaseModel
 
-from evalry.cli import run_sample
+from evalry.cache import GradeCache
+from evalry.engine import run_sample
 from evalry.generation import Generator
 from evalry.schemas import RunRecord, SampleResult, Task, load_task
 from evalry.scoring import TaskStats, pass_at_k, task_stats
@@ -37,18 +39,20 @@ def run_suite(
     samples: int,
     suite_version: str,
     timeout_s: float = 10,
+    cache: GradeCache | None = None,
 ) -> RunRecord:
     """Sequential on purpose: parallel, resumable, idempotent jobs are the phase 2 scheduler's job."""
     if samples < 1:
         raise ValueError("samples must be at least 1.")
+    run_id = uuid.uuid4().hex
     results: list[SampleResult] = []
     started = datetime.now(UTC)
-    for task in tasks:
-        gen = make_generator(task)
-        results += [run_sample(task, gen, i, timeout_s=timeout_s) for i in range(samples)]
-    return RunRecord(
-        run_id=uuid.uuid4().hex, suite_version=suite_version, started_at=started, results=results
-    )
+    # Every log record under this block carries run_id and suite_version (CLAUDE.md logging rules).
+    with bind_context(run_id=run_id, suite_version=suite_version):
+        for task in tasks:
+            gen = make_generator(task)
+            results += [run_sample(task, gen, i, timeout_s=timeout_s, cache=cache) for i in range(samples)]
+    return RunRecord(run_id=run_id, suite_version=suite_version, started_at=started, results=results)
 
 
 def summarize(record: RunRecord, k: int = 1) -> dict[str, TaskSummary]:

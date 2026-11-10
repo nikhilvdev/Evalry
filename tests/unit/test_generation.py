@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from evalry.cli import run_sample
+from evalry.engine import run_sample
 from evalry.generation import FakeGenerator, extract_code
 from evalry.schemas import load_task
 

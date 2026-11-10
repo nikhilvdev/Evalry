@@ -71,3 +71,24 @@ def test_cli_suite_missing_replies_is_a_clear_error(
     replies.write_text("{}")
     assert main(["suite", str(SUITE), "--replies", str(replies)]) == 2
     assert "scripted responses" in capsys.readouterr().err
+
+
+def test_cli_suite_estimate_and_budget_stop(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    replies = tmp_path / "r.json"
+    replies.write_text("{}")  # would fail if the run started: the budget must stop it first
+    rates = tmp_path / "rates.json"
+    rates.write_text('{"usd_per_mtok_in": 1000, "usd_per_mtok_out": 1000}')
+    assert (
+        main(["suite", str(SUITE), "--replies", str(replies), "--rates", str(rates), "--budget", "0.001"])
+        == 2
+    )
+    cap = capsys.readouterr()
+    assert "estimated cost: $" in cap.out and "exceeds the budget" in cap.err and "scripted" not in cap.err
+    assert main(["suite", str(SUITE), "--replies", str(replies), "--budget", "1"]) == 2
+    assert "--rates" in capsys.readouterr().err
+
+
+def test_log_records_carry_run_context(capfd: pytest.CaptureFixture[str]) -> None:
+    run_suite(load_suite(SUITE)[:1], lambda t: FakeGenerator([DOUBLE]), samples=1, suite_version="ctx-suite")
+    out = capfd.readouterr().out
+    assert '"suite_version":"ctx-suite"' in out and '"run_id":' in out

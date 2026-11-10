@@ -1,64 +1,22 @@
 """Local CLI: grade one solution file against one task and write a run record (plan §18, local mode)."""
 
 import argparse
-import hashlib
 import json
 import sys
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from evalry.cache import GradeCache
 from evalry.compare import min_samples, paired_bootstrap, regression_gate, task_means
-from evalry.generation import FakeGenerator, Generator, extract_code, generate_logged
-from evalry.graders import python_tests
+from evalry.cost import Rates, check_budget, estimate
+from evalry.engine import grade
+from evalry.generation import FakeGenerator
 from evalry.log import get_logger
-from evalry.runner import PYTHON_IMAGE, SEED
-from evalry.schemas import RunRecord, SampleResult, Task, load_task
-from evalry.scoring import composite
+from evalry.schemas import RunRecord, Task, load_task
+from evalry.suite import load_suite, run_suite, summarize
 
 log = get_logger("cli")
-
-
-def grade(
-    task: Task,
-    code: str,
-    *,
-    timeout_s: float = 10,
-    generator_model: str = "local-file",
-    sample: int = 0,
-    cost_usd: float = 0,
-) -> SampleResult:
-    """Grade one solution. Only Python tasks have a grader so far."""
-    if task.language != "python":
-        raise ValueError(
-            f"Task {task.id!r} is {task.language}; only python is supported. Add a language profile first."
-        )
-    score, hard_fail = python_tests(task, code, timeout_s=timeout_s)
-    return SampleResult(
-        task_id=task.id,
-        task_hash=hashlib.sha256(task.model_dump_json().encode()).hexdigest(),
-        sample=sample,
-        generator_model=generator_model,
-        code=code,
-        scores=[score],
-        composite=composite([score], {}, hard_fail=hard_fail),
-        cost_usd=cost_usd,
-        image=PYTHON_IMAGE,
-        seed=SEED,
-    )
-
-
-def run_sample(task: Task, generator: Generator, sample: int, *, timeout_s: float = 10) -> SampleResult:
-    """Generate (prompt only, never the tests), extract the code, grade it."""
-    out = generate_logged(generator, task.prompt, sample=sample)
-    return grade(
-        task,
-        extract_code(out.text),
-        timeout_s=timeout_s,
-        generator_model=out.model,
-        sample=sample,
-        cost_usd=out.cost_usd,
-    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -80,6 +38,22 @@ def main(argv: list[str] | None = None) -> int:
     suite.add_argument("--suite-version", default="local")
     suite.add_argument("--out", type=Path)
     suite.add_argument("--timeout", type=float, default=10)
+    suite.add_argument(
+        "--cache-dir",
+        type=Path,
+        help="reuse grading results across runs (keyed by code, tests, grader, image)",
+    )
+    suite.add_argument(
+        "--rates", type=Path, help="JSON of evalry.cost.Rates; prints the estimate before the run"
+    )
+    suite.add_argument(
+        "--budget",
+        type=float,
+        help="USD hard stop; needs --rates. Refuses to start if the estimate exceeds it",
+    )
+    suite.add_argument(
+        "--expected-tokens-out", type=int, default=500, help="per-sample output tokens for the estimate"
+    )
     cmp = sub.add_parser("compare", help="paired-bootstrap comparison of two run records")
     cmp.add_argument("baseline", type=Path)
     cmp.add_argument("candidate", type=Path)
@@ -110,23 +84,47 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if result.composite == 1.0 else 1
 
 
-def _suite(args: argparse.Namespace) -> int:
-    from evalry.suite import load_suite, run_suite, summarize  # local: suite imports this module
+def _estimate(args: argparse.Namespace, tasks: list[Task]) -> None:
+    """Print the pre-run estimate and enforce the budget (plan §15). Input tokens are approximated as chars / 4."""
+    if args.budget is not None and args.rates is None:
+        raise ValueError("--budget needs --rates to estimate against. Pass a rates JSON file.")
+    if args.rates is None:
+        return
+    rates = Rates.model_validate_json(args.rates.read_text())
+    tokens_in = sum(len(t.prompt) for t in tasks) // 4 // max(len(tasks), 1)
+    cost = estimate(
+        rates,
+        tasks=len(tasks),
+        samples=args.samples,
+        tokens_in=tokens_in,
+        tokens_out=args.expected_tokens_out,
+    )
+    print(f"estimated cost: ${cost:.4f} ({len(tasks)} tasks x {args.samples} samples)")
+    if args.budget is not None:
+        check_budget(cost, args.budget)
 
+
+def _suite(args: argparse.Namespace) -> int:
     try:
         replies = json.loads(args.replies.read_text())
+        tasks = load_suite(args.directory)
+        _estimate(args, tasks)
+        cache = GradeCache(args.cache_dir) if args.cache_dir else None
         record = run_suite(
-            load_suite(args.directory),
+            tasks,
             lambda t: FakeGenerator(replies.get(t.id, [])),
             samples=args.samples,
             suite_version=args.suite_version,
             timeout_s=args.timeout,
+            cache=cache,
         )
     except (OSError, ValueError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     if args.out:
         args.out.write_text(record.model_dump_json(indent=2))
+    if cache:
+        print(f"grading cache: {cache.hits} hits, {cache.misses} misses")
     for tid, t in summarize(record, args.k).items():
         p = "n/a" if t.pass_at_k is None else f"{t.pass_at_k:.2f}"
         print(

@@ -14,6 +14,8 @@ isolation, audit trails, access control and cost governance.
 | `evalry.runner` | Docker sandbox for untrusted code: pinned image, no network, non-root, read-only root, capped CPU/memory/processes |
 | `evalry.graders` | `python_tests`: hidden tests run in the sandbox |
 | `evalry.generation` | `Generator` interface, offline `FakeGenerator`, `extract_code`, logged generation calls |
+| `evalry.engine` | `grade` and `run_sample`: the steps shared by the CLI and suite runs |
+| `evalry.cache` | Grading cache keyed by code, tests, grader version, image and seed (`--cache-dir`); timeouts are never cached |
 | `evalry.suite` | Run every task x N samples; per-task mean/min/max/std and `pass@k` |
 | `evalry.scoring` | Composite score with hard floors, unbiased `pass_at_k`, per-task stats |
 | `evalry.compare` | Seeded paired bootstrap over tasks and the regression gate |

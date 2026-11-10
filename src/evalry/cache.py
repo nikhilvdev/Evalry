@@ -1,0 +1,53 @@
+"""Content-addressed grading cache (plan §15): same code + tests + grader + image + seed = same score, so skip the sandbox."""
+
+import hashlib
+import json
+import os
+import tempfile
+from pathlib import Path
+
+from pydantic import ValidationError
+
+from evalry.graders import PYTHON_TESTS_VERSION
+from evalry.log import get_logger
+from evalry.runner import PYTHON_IMAGE, SEED
+from evalry.schemas import GraderScore, Task
+
+log = get_logger("cache")
+
+
+class GradeCache:
+    """On-disk, one JSON file per key. Entries hold grader evidence (stderr tail), so treat the directory like run records."""
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        directory.mkdir(parents=True, exist_ok=True)
+        self.hits = 0
+        self.misses = 0
+
+    @staticmethod
+    def key(task: Task, code: str) -> str:
+        parts = [PYTHON_TESTS_VERSION, PYTHON_IMAGE, SEED, task.tests, code]
+        return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
+
+    def get(self, key: str) -> tuple[GraderScore, bool] | None:
+        try:
+            raw = json.loads((self.directory / f"{key}.json").read_text())
+            entry = GraderScore.model_validate(raw["score"]), bool(raw["hard_fail"])
+        except FileNotFoundError:
+            self.misses += 1
+            return None
+        except (OSError, ValueError, KeyError, ValidationError):
+            log.warn("corrupt cache entry ignored", key=key)  # noqa: G010 (LogQuill API)
+            self.misses += 1
+            return None
+        self.hits += 1
+        return entry
+
+    def put(self, key: str, score: GraderScore, hard_fail: bool) -> None:
+        """Atomic write so a crash or a parallel run never leaves a half-written entry."""
+        payload = json.dumps({"score": score.model_dump(), "hard_fail": hard_fail})
+        fd, tmp = tempfile.mkstemp(dir=self.directory)
+        with os.fdopen(fd, "w") as f:
+            f.write(payload)
+        os.replace(tmp, self.directory / f"{key}.json")
