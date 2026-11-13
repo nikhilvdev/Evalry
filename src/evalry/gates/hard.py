@@ -96,8 +96,18 @@ def decide(
     audit: AuditLog,
     exceptions: list[GateException] | None = None,
     now: datetime | None = None,
+    calibrated_judges: frozenset[str] = frozenset(),
 ) -> GateDecision:
-    """Evaluate the run against the rule, sign the decision, and record it in the audit log."""
+    """Evaluate the run against the rule, sign the decision, and record it in the audit log.
+
+    A rule on the judge needs that judge version in ``calibrated_judges`` (a current, passing calibration record; plan §6):
+    an uncalibrated judge can never gate, whoever calls this.
+    """
+    if rule.grader == "judge" and rule.grader_version not in calibrated_judges:
+        raise ValueError(
+            f"Judge version {rule.grader_version!r} has no current passing calibration, so it cannot gate. "
+            "Calibrate it (evalry judge-calibrate) and record the result, or gate on a deterministic grader."
+        )
     if environment == "production" and not key:
         raise ValueError("Production gate decisions must be signed. Set a signing key (EVALRY_GATE_KEY).")
     now = now or datetime.now(UTC)

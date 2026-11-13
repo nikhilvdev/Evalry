@@ -58,6 +58,8 @@ class Job(BaseModel):
     tenant_id: str = "local"
     project_id: str
     task_id: str
+    run_id: str = ""  # which run assembles this job's result; empty for local runs
+    suite_version: str = ""  # where a worker finds the task, since the job row holds only its id
     sample: int = Field(ge=0)
     stage: Stage = Stage.GRADE
     priority: Priority = Priority.NIGHTLY
@@ -86,6 +88,7 @@ class JobStore(Protocol):
     def running(self) -> int: ...
     def jobs(self) -> list[Job]: ...
     def get(self, key: str) -> Job: ...
+    def run_jobs(self, run_id: str) -> list[Job]: ...
     def spent(self, project_id: str, tenant_id: str = "local") -> float: ...
     def blocked_by_budget(self, project_id: str, tenant_id: str = "local") -> list[Job]: ...
 
@@ -178,6 +181,10 @@ class JobQueue:
     def get(self, key: str) -> Job:
         with self._lock:
             return self._jobs[key]
+
+    def run_jobs(self, run_id: str) -> list[Job]:
+        with self._lock:
+            return [j for j in self._jobs.values() if j.run_id == run_id]
 
     def spent(self, project_id: str, tenant_id: str = "local") -> float:
         with self._lock:

@@ -4,15 +4,20 @@ import contextvars
 import hashlib
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+from logquill import bind_context
+
+from evalry.agent.loop import AgentModel
 from evalry.audit.chain import AuditLog
 from evalry.generation.base import Generator
 from evalry.graders.cache import GradeCache
 from evalry.graders.python_tests import DEFAULT_ISOLATION, Isolation
+from evalry.judge.base import Judge
 from evalry.log import get_logger
+from evalry.repo_tasks import Files
 from evalry.scheduler.engine import run_sample
 from evalry.scheduler.jobs import Job, JobStore, Priority, Stage, State, job_key
 from evalry.schemas import RunRecord, SampleResult, Task
@@ -20,6 +25,9 @@ from evalry.schemas import RunRecord, SampleResult, Task
 log = get_logger("worker")
 
 Executor = Callable[[Job, Task], SampleResult]
+TaskSource = (
+    Mapping[str, Task] | Callable[[Job], Task]
+)  # by task id, or looked up per job (a worker serves many suites)
 
 
 def task_hash(task: Task) -> str:
@@ -38,6 +46,7 @@ def submit_run(
     audit: AuditLog | None = None,
     actor: str = "unknown",
     tenant_id: str = "local",
+    run_id: str = "",
 ) -> list[Job]:
     """Enqueue task x sample jobs. Safe to call again for the same run: existing keys are returned, not duplicated."""
     if audit:
@@ -59,6 +68,8 @@ def submit_run(
                 tenant_id=tenant_id,
                 project_id=project_id,
                 task_id=t.id,
+                run_id=run_id,
+                suite_version=suite_version,
                 sample=i,
                 priority=priority,
             )
@@ -74,6 +85,10 @@ def sandbox_executor(
     timeout_s: float = 10,
     cache: GradeCache | None = None,
     isolation: Isolation = DEFAULT_ISOLATION,
+    judge_for: Callable[[Task], Judge] | None = None,
+    judge_weight: float = 0.0,
+    snapshot_for: Callable[[Job, Task], Files] | None = None,
+    agent_for: Callable[[Task], AgentModel] | None = None,
 ) -> Executor:
     """Executor that generates then grades in the sandbox. The generator is built per job, so job order cannot matter."""
 
@@ -85,6 +100,10 @@ def sandbox_executor(
             timeout_s=timeout_s,
             cache=cache,
             isolation=isolation,
+            judge=judge_for(task) if judge_for else None,
+            judge_weight=judge_weight,
+            snapshot=snapshot_for(job, task) if snapshot_for and task.tier >= 3 else None,
+            agent=agent_for(task) if agent_for and task.tier == 4 else None,
         )
 
     return execute
@@ -126,7 +145,7 @@ class _Budget:
 
 
 def _loop(
-    queue: JobStore, tasks: dict[str, Task], execute: Executor, audit: AuditLog | None, limit: _Budget
+    queue: JobStore, tasks: TaskSource, execute: Executor, audit: AuditLog | None, limit: _Budget
 ) -> int:
     done = 0
     while limit.take():
@@ -138,7 +157,12 @@ def _loop(
             time.sleep(0.02)
             continue
         try:
-            result = execute(job, tasks[job.task_id])
+            task = tasks(job) if callable(tasks) else tasks[job.task_id]
+            # Local runs bind these in run_suite already; only queued jobs carry their own.
+            with bind_context(
+                **{k: v for k, v in (("run_id", job.run_id), ("suite_version", job.suite_version)) if v}
+            ):
+                result = execute(job, task)
         except Exception as e:  # noqa: BLE001 (any job error must be recorded, not crash the worker)
             log.error(
                 "job failed",
@@ -163,7 +187,7 @@ def _loop(
 
 def work(
     queue: JobStore,
-    tasks: dict[str, Task],
+    tasks: TaskSource,
     execute: Executor,
     *,
     max_jobs: int | None = None,

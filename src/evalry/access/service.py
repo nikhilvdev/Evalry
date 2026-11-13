@@ -63,9 +63,16 @@ def gate_run(
                 f"{e.approver!r} does not hold the approver role on project {project_id!r}, so they cannot approve "
                 f"an exception for task {e.task_id!r}. Name an approver or ask a project admin to grant the role."
             )
+    calibrated = scope.calibrated_judges(project_id, now)
+    if rule.grader == "judge" and rule.grader_version not in calibrated:
+        raise PermissionDenied(
+            f"Judge version {rule.grader_version!r} has no current passing calibration in project {project_id!r}, so it "
+            "cannot gate. Record a passing calibration (POST /v1/projects/{project}/judge-calibrations) or gate on a "
+            "deterministic grader."
+        )
     decision = decide(
         record, rule, actor=scope.subject, environment=environment, project_id=project_id, tenant_id=scope.tenant_id,
-        key=key, audit=audit, exceptions=exceptions, now=now,
+        key=key, audit=audit, exceptions=exceptions, now=now, calibrated_judges=calibrated,
     )  # fmt: skip
     scope.put_decision(project_id, decision)
     return decision

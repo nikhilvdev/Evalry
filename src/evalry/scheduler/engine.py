@@ -2,11 +2,15 @@
 
 import hashlib
 
+from evalry.agent.loop import AgentModel
 from evalry.generation.base import Generator, extract_code, generate_logged
 from evalry.graders.cache import GradeCache
 from evalry.graders.python_tests import DEFAULT_ISOLATION, Isolation, python_tests
+from evalry.judge.base import Judge, judge_logged
+from evalry.repo_tasks import Files
 from evalry.runner.sandbox import PYTHON_IMAGE, SEED
-from evalry.schemas import SampleResult, Task
+from evalry.scheduler.repo_engine import run_agent_sample, run_repo_sample
+from evalry.schemas import GraderScore, SampleResult, Task
 from evalry.scoring.stats import composite
 
 
@@ -57,10 +61,33 @@ def run_sample(
     timeout_s: float = 10,
     cache: GradeCache | None = None,
     isolation: Isolation = DEFAULT_ISOLATION,
+    judge: Judge | None = None,
+    judge_weight: float = 0.0,
+    snapshot: Files | None = None,
+    agent: AgentModel | None = None,
 ) -> SampleResult:
-    """Generate (prompt only, never the tests), extract the code, grade it."""
+    """Generate (prompt only, never the tests), extract the code, grade it, and judge it if it passed everything.
+
+    Only solutions that pass every deterministic grader are judged (plan §15), so judge spend follows p_judge. The judge score
+    is always recorded raw; it counts toward the composite only with a positive ``judge_weight``, so an uncalibrated judge
+    stays advisory by default (plan §6).
+    """
+    if task.tier >= 3:
+        # Repository and agent tasks have their own path. They are advisory only (see runner.repo) and are not judged.
+        if snapshot is None:
+            raise ValueError(
+                f"Task {task.id!r} is tier {task.tier}: it needs its repository snapshot. Run it through a worker with an "
+                "object store (evalry worker --object-dir ...), not the local suite command."
+            )
+        if task.tier == 4:
+            if agent is None:
+                raise ValueError(
+                    f"Task {task.id!r} is an agent task: the worker needs an agent model (--generator-url)."
+                )
+            return run_agent_sample(task, agent, sample, snapshot, timeout_s=max(timeout_s, 300))
+        return run_repo_sample(task, generator, sample, snapshot, timeout_s=max(timeout_s, 300))
     out = generate_logged(generator, task.prompt, sample=sample)
-    return grade(
+    result = grade(
         task,
         extract_code(out.text),
         timeout_s=timeout_s,
@@ -69,4 +96,22 @@ def run_sample(
         sample=sample,
         cost_usd=out.cost_usd,
         cache=cache,
+    )
+    if judge is None or result.composite == 0 or any(sc.score < 1.0 for sc in result.scores):
+        return result
+    verdict = judge_logged(judge, task.prompt, result.code, sample=sample)
+    scores = [
+        *result.scores,
+        GraderScore(
+            grader="judge", grader_version=verdict.judge_version, score=(verdict.score - 1) / 4,
+            evidence=verdict.rationale,
+        ),
+    ]  # fmt: skip
+    return result.model_copy(
+        update={
+            "scores": scores,
+            "composite": composite(scores, {"judge": judge_weight}),
+            "cost_usd": result.cost_usd + verdict.cost_usd,
+            "judge_version": verdict.judge_version,
+        }
     )

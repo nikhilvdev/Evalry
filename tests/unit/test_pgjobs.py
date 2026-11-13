@@ -1,8 +1,11 @@
+import json
 import time
+from pathlib import Path
 
 import psycopg
 import pytest
 
+from evalry.cli import main
 from evalry.scheduler.jobs import Job, Priority, ProjectLimits, Stage, State, job_key
 from evalry.scheduler.worker import work
 from evalry.schemas import SampleResult, Task
@@ -185,3 +188,197 @@ def test_workers_can_read_suites_but_not_write_them(db: PgDb) -> None:
         assert c.execute("SELECT count(*) FROM suites").fetchone() == (1,)
         with pytest.raises(psycopg.Error):
             c.execute("DELETE FROM suites")
+
+
+def test_worker_finds_the_suite_from_the_job_and_runs_are_tenant_scoped(db: PgDb) -> None:
+    tasks = [Task(id="t", language="python", prompt="p", tests="assert True")]
+    pg = PostgresBackend(db.app_dsn)
+    try:
+        assert pg.put_suite("acme", "app", "s1", tasks, "alice")
+    finally:
+        pg.close()
+    enqueue(db, job("t", run_id="r1", suite_version="s1"))
+    w = worker(db)
+    try:
+        claimed = w.claim()
+        assert claimed and (claimed.run_id, claimed.suite_version) == ("r1", "s1")
+        assert [
+            t.id for t in w.suite_tasks(claimed.tenant_id, claimed.project_id, claimed.suite_version)
+        ] == ["t"]
+        with pytest.raises(KeyError):
+            w.suite_tasks("acme", "app", "missing")
+        assert w.run_jobs("r1")[0].key == claimed.key
+    finally:
+        w.close()
+    api = PostgresJobQueue(db.app_dsn, tenant_id="-")
+    try:
+        assert [j.key for j in api.for_tenant("acme").run_jobs("r1")] == [claimed.key]
+        assert api.for_tenant("globex").run_jobs("r1") == []  # row-level security, not just a filter
+    finally:
+        api.close()
+
+
+def test_cli_worker_grades_a_queued_run_in_the_sandbox(
+    db: PgDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """API-side enqueue, then `evalry worker --once` as the evalry_worker role, then the API-side assembly of the run."""
+    task = Task(
+        id="double", language="python", prompt="p", tests="assert double(2) == 4\nassert double(0) == 0"
+    )
+    pg = PostgresBackend(db.app_dsn)
+    try:
+        pg.put_suite("acme", "app", "s1", [task], "alice")
+    finally:
+        pg.close()
+    enqueue(db, job("double", run_id="r1", suite_version="s1"))
+    replies = tmp_path / "replies.json"
+    replies.write_text(json.dumps({"double": ["```python\ndef double(n):\n    return n * 2\n```"]}))
+    monkeypatch.setenv("EVALRY_DB_WORKER_DSN", db.worker_dsn)
+    assert main(["worker", "--once", "--replies", str(replies)]) == 0
+    api = PostgresJobQueue(db.app_dsn, tenant_id="acme")
+    try:
+        (done,) = api.run_jobs("r1")
+    finally:
+        api.close()
+    assert (
+        done.state is State.DONE
+        and done.result
+        and done.result.composite == 1.0
+        and done.result.isolation == "rpc"
+    )
+    monkeypatch.delenv("EVALRY_DB_WORKER_DSN")
+    assert (
+        main(["worker", "--once", "--replies", str(replies)]) == 2
+    )  # no DSN: refuses with a message, not a traceback
+
+
+def test_calibrations_are_append_only_and_tenant_scoped(db: PgDb) -> None:
+    from datetime import UTC, datetime
+
+    from evalry.judge.calibration import CalibrationRecord
+
+    rec = CalibrationRecord(
+        judge_version="jv", set_hash="a" * 64, items=20, agreement_within_one=1, stability=1, injection_resistant=True,
+        passed=True, calibration_id="c1", created_at=datetime.now(UTC), created_by="alice",
+    )  # fmt: skip
+    pg = PostgresBackend(db.app_dsn)
+    try:
+        assert pg.put_calibration("acme", "app", rec) and not pg.put_calibration("acme", "app", rec)
+        assert [r.calibration_id for r in pg.list_calibrations("acme", "app")] == ["c1"]
+        assert pg.list_calibrations("globex", "app") == []
+        with psycopg.connect(db.app_dsn) as conn:
+            conn.execute("SELECT set_config('evalry.tenant_id', 'acme', false)")
+            with pytest.raises(
+                (psycopg.errors.InsufficientPrivilege, psycopg.errors.IntegrityConstraintViolation)
+            ):  # no grant, and a trigger behind it
+                conn.execute("UPDATE judge_calibrations SET passed = false")
+    finally:
+        pg.close()
+
+
+def test_labeling_rows_are_append_only_tenant_scoped_and_one_label_per_reviewer(db: PgDb) -> None:
+    from datetime import UTC, datetime
+
+    from evalry import labeling
+
+    now = datetime.now(UTC)
+    batch = labeling.LabelBatch(
+        batch_id="b1", guideline="g", created_by="boss", created_at=now,
+        items=labeling.make_items([labeling.LabelItemIn(prompt="p", code="c")], 0),
+    )  # fmt: skip
+    label = labeling.Label(batch_id="b1", item_id=0, reviewer="ann", score=4, created_at=now)
+    pg = PostgresBackend(db.app_dsn)
+    try:
+        assert pg.put_label_batch("acme", "app", batch) and not pg.put_label_batch("acme", "app", batch)
+        assert pg.put_label("acme", "app", label) and not pg.put_label("acme", "app", label)
+        assert [x.score for x in pg.list_labels("acme", "app", "b1")] == [4]
+        assert pg.get_label_batch("acme", "app", "b1") == batch
+        assert (
+            pg.get_label_batch("globex", "app", "b1") is None and pg.list_labels("globex", "app", "b1") == []
+        )
+        with psycopg.connect(db.app_dsn) as conn:
+            conn.execute("SELECT set_config('evalry.tenant_id', 'acme', false)")
+            with pytest.raises(
+                (psycopg.errors.InsufficientPrivilege, psycopg.errors.IntegrityConstraintViolation)
+            ):
+                conn.execute("UPDATE labels SET reviewer = 'mallory'")  # no grant, and a trigger behind it
+    finally:
+        pg.close()
+
+
+def test_dispute_rows_need_a_real_decision_and_are_append_only_and_tenant_scoped(db: PgDb) -> None:
+    from datetime import UTC, datetime
+
+    from evalry.disputes import Dispute, Resolution
+    from evalry.gates.hard import GateDecision
+    from evalry.schemas import RunRecord
+
+    now = datetime.now(UTC)
+    run = RunRecord(run_id="r1", suite_version="s1", started_at=now, results=[])
+    decision = GateDecision(
+        decision_id="d1", gate="g", rule_hash="h", run_id="r1", suite_version="s1", environment="dev", outcome="block",
+        reasons=["x"], waived=[], pass_rate=0.0, samples=1, actor="a", decided_at=now,
+    )  # fmt: skip
+    dispute = Dispute(
+        decision_id="d1", run_id="r1", opened_by="ann", reason="why", task_ids=["t"], created_at=now
+    )
+    res = Resolution(decision_id="d1", resolved_by="boss", outcome="rejected", rationale="no", created_at=now)
+    pg = PostgresBackend(db.app_dsn)
+    try:
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            pg.put_dispute("acme", "app", dispute)  # no such decision yet
+        pg.put_run("acme", "app", run)
+        pg.put_decision("acme", "app", decision)
+        assert pg.put_dispute("acme", "app", dispute) and not pg.put_dispute("acme", "app", dispute)
+        assert pg.get_resolution("acme", "app", "d1") is None
+        assert pg.put_resolution("acme", "app", res) and not pg.put_resolution("acme", "app", res)
+        assert (
+            pg.get_dispute("acme", "app", "d1") == dispute and pg.get_resolution("acme", "app", "d1") == res
+        )
+        assert pg.list_disputes("acme", "app") == [dispute] and pg.list_disputes("globex", "app") == []
+        assert pg.get_dispute("globex", "app", "d1") is None
+        with psycopg.connect(db.app_dsn) as conn:
+            conn.execute("SELECT set_config('evalry.tenant_id', 'acme', false)")
+            with pytest.raises(
+                (psycopg.errors.InsufficientPrivilege, psycopg.errors.IntegrityConstraintViolation)
+            ):
+                conn.execute("UPDATE dispute_resolutions SET decision_id = 'x'")
+    finally:
+        pg.close()
+
+
+def test_production_rows_are_idempotent_append_only_and_tenant_scoped(db: PgDb) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from evalry.monitoring import Closure, Incident, Signal
+
+    now = datetime.now(UTC)
+    sig = Signal(signal_id="s1", task_id="t", kind="reverted", observed_at=now)
+    inc = Incident(incident_id="i1", task_id="t", kind="other", note="n", opened_by="boss", created_at=now)
+    closed = Closure(
+        incident_id="i1", outcome="not_an_eval_problem", rationale="r", suite_version=None, added_task_ids=[],
+        closed_by="boss", created_at=now,
+    )  # fmt: skip
+    pg = PostgresBackend(db.app_dsn)
+    try:
+        assert pg.put_signals("acme", "app", [sig, sig.model_copy(update={"signal_id": "s2"})]) == 2
+        assert pg.put_signals("acme", "app", [sig]) == 0  # resending is harmless
+        since = now - timedelta(days=1)
+        assert (
+            len(pg.list_signals("acme", "app", since)) == 2 and pg.list_signals("globex", "app", since) == []
+        )
+        assert pg.list_signals("acme", "app", now + timedelta(days=1)) == []
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            pg.put_closure("acme", "app", closed)  # no such incident yet
+        assert pg.put_incident("acme", "app", inc) and not pg.put_incident("acme", "app", inc)
+        assert pg.put_closure("acme", "app", closed) and not pg.put_closure("acme", "app", closed)
+        assert pg.list_incidents("acme", "app") == [inc] and pg.list_closures("acme", "app") == [closed]
+        assert pg.list_incidents("globex", "app") == []
+        with psycopg.connect(db.app_dsn) as conn:
+            conn.execute("SELECT set_config('evalry.tenant_id', 'acme', false)")
+            with pytest.raises(
+                (psycopg.errors.InsufficientPrivilege, psycopg.errors.IntegrityConstraintViolation)
+            ):
+                conn.execute("UPDATE production_signals SET kind = 'accepted'")
+    finally:
+        pg.close()

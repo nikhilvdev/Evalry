@@ -63,6 +63,11 @@ def test_migrate_is_idempotent_and_records_a_checksum(pg_db: PgDb) -> None:
         ("0002_audit.sql", 64),
         ("0003_jobs.sql", 64),
         ("0004_suites.sql", 64),
+        ("0005_job_run.sql", 64),
+        ("0006_calibrations.sql", 64),
+        ("0007_labeling.sql", 64),
+        ("0008_disputes.sql", 64),
+        ("0009_production.sql", 64),
     ]
 
 

@@ -30,6 +30,61 @@ services:
       - "127.0.0.1:9000:9000" # loopback only
     volumes:
       - evalry-objects:/data
+  # The only service that holds ANTHROPIC_API_KEY: workers reach it with EVALRY_GEN_TOKEN and never see the provider key.
+  # Workers run on the host (they start sandbox containers), so it is published on loopback only. No model or price default.
+  generator:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.generator
+    restart: unless-stopped
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}
+      EVALRY_GEN_MODEL: ${EVALRY_GEN_MODEL:?set EVALRY_GEN_MODEL}
+      EVALRY_GEN_USD_PER_MTOK_IN: ${EVALRY_GEN_USD_PER_MTOK_IN:?set EVALRY_GEN_USD_PER_MTOK_IN}
+      EVALRY_GEN_USD_PER_MTOK_OUT: ${EVALRY_GEN_USD_PER_MTOK_OUT:?set EVALRY_GEN_USD_PER_MTOK_OUT}
+      EVALRY_GEN_TOKEN: ${EVALRY_GEN_TOKEN:?set EVALRY_GEN_TOKEN (32+ characters)}
+      EVALRY_GEN_ALLOWED_SENSITIVITY: ${EVALRY_GEN_ALLOWED_SENSITIVITY:-public,internal}
+      EVALRY_GEN_HOST: 0.0.0.0 # inside the container; the published port below is loopback only
+    ports:
+      - "127.0.0.1:8001:8001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8001/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+  # Same image as the generator, different entry point. The rubric is the eval owner's approved file, mounted read-only; it is
+  # part of the judge version, so editing it creates a new judge that must pass calibration before it can gate.
+  judge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.generator
+    command: ["evalry-judge"]
+    restart: unless-stopped
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}
+      EVALRY_JUDGE_MODEL: ${EVALRY_JUDGE_MODEL:?set EVALRY_JUDGE_MODEL}
+      EVALRY_JUDGE_USD_PER_MTOK_IN: ${EVALRY_JUDGE_USD_PER_MTOK_IN:?set EVALRY_JUDGE_USD_PER_MTOK_IN}
+      EVALRY_JUDGE_USD_PER_MTOK_OUT: ${EVALRY_JUDGE_USD_PER_MTOK_OUT:?set EVALRY_JUDGE_USD_PER_MTOK_OUT}
+      EVALRY_JUDGE_TOKEN: ${EVALRY_JUDGE_TOKEN:?set EVALRY_JUDGE_TOKEN (32+ characters)}
+      EVALRY_JUDGE_ALLOWED_SENSITIVITY: ${EVALRY_JUDGE_ALLOWED_SENSITIVITY:-public,internal}
+      EVALRY_JUDGE_RUBRIC_FILE: /config/rubric.md
+      EVALRY_JUDGE_HOST: 0.0.0.0 # inside the container; the published port below is loopback only
+      EVALRY_JUDGE_PORT: "8002"
+    volumes:
+      - ${EVALRY_JUDGE_RUBRIC_FILE:?set EVALRY_JUDGE_RUBRIC_FILE (host path of the approved rubric)}:/config/rubric.md:ro
+    ports:
+      - "127.0.0.1:8002:8002"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8002/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 volumes:
   evalry-pg:
   evalry-objects:

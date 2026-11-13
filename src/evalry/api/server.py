@@ -9,7 +9,7 @@ binds to loopback unless told otherwise; put TLS termination and a body-size lim
 import os
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,8 +21,10 @@ from evalry.api.app import create_app
 from evalry.api.auth import JwksKeys, KeyResolver, StaticKeys, TokenVerifier
 from evalry.audit.chain import AuditLog
 from evalry.gates.hard import Environment
+from evalry.scheduler.jobs import JobQueue, JobStore
 from evalry.storage.backend import Backend, MemoryBackend
 from evalry.storage.objects import FileObjectStore, ObjectStore, S3ObjectStore
+from evalry.storage.pgjobs import PostgresJobQueue
 from evalry.storage.pgstore import PostgresAuditSink, PostgresBackend
 
 _ENVIRONMENTS: tuple[str, ...] = ("dev", "staging", "production")
@@ -194,7 +196,17 @@ def build_app(settings: Settings) -> FastAPI:
         keys=_keys(settings),
         tenant_claim=settings.tenant_claim,
     )
+    queue_for: Callable[[str], JobStore]
+    if settings.db_app_dsn:
+        pg_queue = PostgresJobQueue(
+            settings.db_app_dsn, tenant_id="-"
+        )  # "-" is no tenant: every view rebinds it
+        queue_for = pg_queue.for_tenant
+    else:
+        local = JobQueue()  # dev only: nothing outside this process can work it
+        queue_for = lambda tenant: local
     return create_app(
+        queue_for=queue_for,
         store=store,
         audit=audit,
         verifier=verifier,

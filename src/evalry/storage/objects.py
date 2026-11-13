@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -94,3 +95,25 @@ class S3ObjectStore:
         except self.client.exceptions.NoSuchKey:
             return None
         return _verified(bytes(body.read()), digest)
+
+
+def objects_from_env(env: Mapping[str, str]) -> ObjectStore | None:
+    """The object store a worker or operator tool reads: ``EVALRY_OBJECT_DIR`` (dev) or the ``EVALRY_S3_*`` settings, else None.
+
+    shortcut: mirrors the API server's own setup; share one builder when the worker gets its own service account.
+    """
+    if directory := env.get("EVALRY_OBJECT_DIR"):
+        return FileObjectStore(Path(directory))
+    if bucket := env.get("EVALRY_S3_BUCKET"):
+        import boto3  # type: ignore[import-untyped]
+
+        if not (env.get("EVALRY_S3_ACCESS_KEY") and env.get("EVALRY_S3_SECRET_KEY")):
+            raise ValueError(
+                "EVALRY_S3_ACCESS_KEY and EVALRY_S3_SECRET_KEY are required with EVALRY_S3_BUCKET."
+            )
+        client = boto3.client(
+            "s3", endpoint_url=env.get("EVALRY_S3_ENDPOINT") or None,
+            aws_access_key_id=env["EVALRY_S3_ACCESS_KEY"], aws_secret_access_key=env["EVALRY_S3_SECRET_KEY"],
+        )  # fmt: skip
+        return S3ObjectStore(client, bucket)
+    return None

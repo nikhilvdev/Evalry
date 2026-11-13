@@ -7,6 +7,7 @@ budget limits hold across processes, and each holds a lease: if a worker dies, t
 shortcut: no heartbeat, so a single job must finish within ``lease_s``; add one before jobs can run longer than that.
 """
 
+import copy
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -16,17 +17,17 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from evalry.scheduler.jobs import Job, Priority, ProjectLimits, Stage, State
-from evalry.schemas import SampleResult
+from evalry.schemas import SampleResult, Task
 from evalry.storage.pgstore import UnsafeConnection
 
 _CLAIM_LOCK = 7_461_922_002  # arbitrary constant shared by every Evalry worker
-_COLS = "tenant_id, key, project_id, task_id, sample, stage, priority, state, attempts, max_attempts, error, result"
+_COLS = "tenant_id, key, project_id, task_id, sample, stage, priority, state, attempts, max_attempts, error, result, run_id, suite_version"
 
 
 def _job(row: tuple[Any, ...]) -> Job:
-    t, key, project, task, sample, stage, prio, state, attempts, max_attempts, error, result = row
+    t, key, project, task, sample, stage, prio, state, attempts, max_attempts, error, result, run, suite = row
     return Job(
-        key=key, tenant_id=t, project_id=project, task_id=task, sample=sample, stage=Stage(stage),
+        run_id=run, suite_version=suite, key=key, tenant_id=t, project_id=project, task_id=task, sample=sample, stage=Stage(stage),
         priority=Priority(prio), state=State(state), attempts=attempts, max_attempts=max_attempts, error=error,
         result=SampleResult.model_validate(result) if result is not None else None,
     )  # fmt: skip
@@ -69,6 +70,23 @@ class PostgresJobQueue:
     def close(self) -> None:
         self._pool.close()
 
+    def for_tenant(self, tenant_id: str) -> "PostgresJobQueue":
+        """A view bound to one tenant that shares this queue's connection pool; close the original, not the view."""
+        view = copy.copy(self)
+        view._tenant = tenant_id
+        return view
+
+    def suite_tasks(self, tenant_id: str, project_id: str, suite_version: str) -> list[Task]:
+        """A suite's tasks (hidden tests included) for the worker role, which reads suites across tenants but never writes."""
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT tasks FROM suites WHERE tenant_id = %s AND project_id = %s AND suite_version = %s",
+                (tenant_id, project_id, suite_version),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"suite {suite_version!r} of {tenant_id}/{project_id}")
+        return [Task.model_validate(t) for t in row[0]]
+
     @contextmanager
     def _tx(self) -> Iterator[psycopg.Connection]:
         with self._pool.connection() as conn, conn.transaction():
@@ -83,10 +101,10 @@ class PostgresJobQueue:
         """Idempotent: an existing key returns the stored job untouched, whatever its state."""
         with self._tx() as conn:
             conn.execute(
-                "INSERT INTO jobs (tenant_id, key, project_id, task_id, sample, stage, priority, max_attempts) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (tenant_id, key) DO NOTHING",
+                "INSERT INTO jobs (tenant_id, key, project_id, task_id, sample, stage, priority, max_attempts, run_id, suite_version) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (tenant_id, key) DO NOTHING",
                 (job.tenant_id, job.key, job.project_id, job.task_id, job.sample, job.stage.value,
-                 int(job.priority), job.max_attempts),
+                 int(job.priority), job.max_attempts, job.run_id, job.suite_version),
             )  # fmt: skip
             row = conn.execute(
                 f"SELECT {_COLS} FROM jobs WHERE tenant_id = %s AND key = %s",
@@ -176,6 +194,13 @@ class PostgresJobQueue:
         if row is None:
             raise KeyError(key)
         return _job(row)
+
+    def run_jobs(self, run_id: str) -> list[Job]:
+        with self._tx() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLS} FROM jobs WHERE run_id = %s ORDER BY seq", (run_id,)
+            ).fetchall()
+        return [_job(r) for r in rows]
 
     def spent(self, project_id: str, tenant_id: str = "local") -> float:
         with self._tx() as conn:

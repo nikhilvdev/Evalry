@@ -7,6 +7,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=2.8.0",
     "boto3>=1.44.0",
     "fastapi>=0.162.3",
     "logquill>=3.0.0",
@@ -20,6 +21,8 @@ dependencies = [
 [project.scripts]
 evalry = "evalry.cli:main"
 evalry-api = "evalry.api.server:main"
+evalry-generator = "evalry.generation.service:main"
+evalry-judge = "evalry.judge.service:main"
 
 [build-system]
 requires = ["uv_build>=0.13.7,<0.14.0"]
