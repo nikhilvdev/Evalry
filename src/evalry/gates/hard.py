@@ -14,7 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from evalry.audit import AuditLog
+from evalry.audit.chain import AuditLog
 from evalry.schemas import RunRecord
 
 Environment = Literal["dev", "staging", "production"]

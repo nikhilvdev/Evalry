@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from evalry.generation import FakeGenerator
-from evalry.jobs import Job, JobQueue, ProjectLimits, State
+from evalry.generation.base import FakeGenerator
+from evalry.scheduler.jobs import Job, JobQueue, ProjectLimits, State
+from evalry.scheduler.worker import collect, sandbox_executor, submit_run, work
 from evalry.schemas import SampleResult, Task, load_task
-from evalry.worker import collect, sandbox_executor, submit_run, work
 
 GOLDEN = Path(__file__).parent.parent / "golden"
 TASKS = [Task(id=f"t{i}", language="python", prompt="p", tests="t") for i in range(3)]

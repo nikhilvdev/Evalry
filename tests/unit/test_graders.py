@@ -1,4 +1,4 @@
-from evalry.graders import python_tests
+from evalry.graders.python_tests import python_tests
 from evalry.schemas import Task
 
 T = Task(id="t", language="python", prompt="p", tests="assert f() == 1")

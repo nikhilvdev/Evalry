@@ -10,10 +10,11 @@ Postgres backend (tenant_id in every key, row-level security as a second layer) 
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 
-from evalry.audit import AuditLog
-from evalry.backend import Backend, MemoryBackend
-from evalry.gates import GateDecision
-from evalry.schemas import RunRecord
+from evalry.audit.chain import AuditLog
+from evalry.gates.hard import GateDecision
+from evalry.schemas import RunRecord, Task
+from evalry.storage.backend import Backend, MemoryBackend
+from evalry.storage.objects import ObjectError, ObjectStore
 
 
 class Role(IntEnum):
@@ -51,7 +52,7 @@ class PermissionDenied(AccessError):
 
 
 class Conflict(AccessError):
-    """Results and decisions are immutable: a record with this id already exists."""
+    """Results, decisions and suite versions are immutable: a record with this id already exists."""
 
 
 @dataclass(frozen=True)
@@ -69,9 +70,12 @@ def _missing(project_id: str) -> NotFound:
 class Store:
     """Owns all state. Handlers never touch it directly: they get a ``ScopedStore`` from ``view``."""
 
-    def __init__(self, audit: AuditLog, backend: Backend | None = None) -> None:
+    def __init__(
+        self, audit: AuditLog, backend: Backend | None = None, objects: ObjectStore | None = None
+    ) -> None:
         self._audit = audit
         self._b: Backend = backend or MemoryBackend()
+        self._objects = objects  # when set, solution code lives here and the run row keeps only its digest
 
     def bootstrap_tenant(self, tenant_id: str, admin_subject: str, *, operator: str) -> None:
         """Operator action (not reachable from a request): create a tenant with its first admin."""
@@ -174,7 +178,8 @@ class ScopedStore:
 
     def put_run(self, project_id: str, record: RunRecord) -> None:
         self._resolve(project_id, Action.SUBMIT)
-        if not self._b.put_run(self._p.tenant_id, project_id, record):
+        stored = self._offload(project_id, record)
+        if not self._b.put_run(self._p.tenant_id, project_id, stored):
             raise Conflict(
                 f"Run {record.run_id!r} already exists; run records are immutable. Use a new run id."
             )
@@ -185,7 +190,43 @@ class ScopedStore:
         found = self._b.get_run(self._p.tenant_id, project_id, run_id)
         if found is None:
             raise NotFound(f"Run {run_id!r} was not found in project {project_id!r}.")
-        return found
+        return self._rehydrate(project_id, found)
+
+    def _offload(self, project_id: str, record: RunRecord) -> RunRecord:
+        """Move each sample's code to object storage. Written before the row, so a failure leaves only unreferenced blobs."""
+        if self._s._objects is None:
+            return record
+        t, objects = self._p.tenant_id, self._s._objects
+        return record.model_copy(
+            update={
+                "results": [
+                    r.model_copy(
+                        update={"code": "", "code_digest": objects.put(t, project_id, r.code.encode())}
+                    )
+                    for r in record.results
+                ]
+            }
+        )
+
+    def _rehydrate(self, project_id: str, record: RunRecord) -> RunRecord:
+        """Put code back from object storage. The caller's READ role was already checked by ``get_run``."""
+        if all(r.code_digest is None for r in record.results):
+            return record
+        if self._s._objects is None:
+            raise ObjectError("This run's code is in object storage, but no object store is configured.")
+        t, objects = self._p.tenant_id, self._s._objects
+        results = []
+        for r in record.results:
+            if r.code_digest is None:
+                results.append(r)
+                continue
+            blob = objects.get(t, project_id, r.code_digest)
+            if blob is None:
+                raise ObjectError(
+                    f"Code {r.code_digest} for run {record.run_id!r} is missing from object storage."
+                )
+            results.append(r.model_copy(update={"code": blob.decode()}))
+        return record.model_copy(update={"results": results})
 
     def list_runs(self, project_id: str) -> list[str]:
         self._resolve(project_id, Action.READ)
@@ -207,3 +248,32 @@ class ScopedStore:
         if found is None:
             raise NotFound(f"Decision {decision_id!r} was not found in project {project_id!r}.")
         return found
+
+    # -- suites ----------------------------------------------------------------------------------------------------
+
+    def put_suite(self, project_id: str, version: str, tasks: list[Task]) -> str:
+        """Create an immutable suite version (author or higher). Returns the content hash a gate can pin."""
+        self._resolve(project_id, Action.SUBMIT)
+        if not tasks:
+            raise ValueError("A suite needs at least one task.")
+        if len({t.id for t in tasks}) != len(tasks):
+            raise ValueError("Task ids in a suite must be unique.")
+        digest = self._b.put_suite(self._p.tenant_id, project_id, version, tasks, self._p.subject)
+        if digest is None:
+            raise Conflict(
+                f"Suite {version!r} already exists; suite versions are immutable. Use a new version."
+            )
+        self._record("suite.created", project_id, version, content_hash=digest, tasks=str(len(tasks)))
+        return digest
+
+    def get_suite(self, project_id: str, version: str) -> list[Task]:
+        """The tasks including hidden tests, so author or higher; viewers can list versions only."""
+        self._resolve(project_id, Action.SUBMIT)
+        found = self._b.get_suite(self._p.tenant_id, project_id, version)
+        if found is None:
+            raise NotFound(f"Suite {version!r} was not found in project {project_id!r}.")
+        return found
+
+    def list_suites(self, project_id: str) -> list[str]:
+        self._resolve(project_id, Action.READ)
+        return self._b.list_suites(self._p.tenant_id, project_id)

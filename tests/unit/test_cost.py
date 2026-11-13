@@ -1,6 +1,6 @@
 import pytest
 
-from evalry.cost import Rates, check_budget, estimate
+from evalry.billing.cost import Rates, check_budget, estimate
 
 R = Rates(usd_per_mtok_in=3, usd_per_mtok_out=15, judge_usd_per_sample=0.01, compute_usd_per_sample=0.002)
 

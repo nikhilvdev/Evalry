@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from evalry.graders import python_tests
-from evalry.runner import run_python_tests, run_python_tests_rpc
+from evalry.graders.python_tests import python_tests
+from evalry.runner.sandbox import run_python_tests, run_python_tests_rpc
 from evalry.schemas import Task, load_task
 
 pytestmark = pytest.mark.skipif(

@@ -7,6 +7,7 @@ services:
     environment:
       POSTGRES_PASSWORD: ${EVALRY_PG_ADMIN_PASSWORD:?set EVALRY_PG_ADMIN_PASSWORD}
       EVALRY_PG_APP_PASSWORD: ${EVALRY_PG_APP_PASSWORD:?set EVALRY_PG_APP_PASSWORD}
+      EVALRY_PG_WORKER_PASSWORD: ${EVALRY_PG_WORKER_PASSWORD:?set EVALRY_PG_WORKER_PASSWORD}
       POSTGRES_DB: evalry
     ports:
       - "127.0.0.1:5432:5432" # loopback only
@@ -18,5 +19,17 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  minio:
+    image: minio/minio:latest # pin a digest before the pilot, like the runner image
+    restart: unless-stopped
+    command: server /data --console-address 127.0.0.1:9001
+    environment:
+      MINIO_ROOT_USER: ${EVALRY_S3_ACCESS_KEY:?set EVALRY_S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${EVALRY_S3_SECRET_KEY:?set EVALRY_S3_SECRET_KEY}
+    ports:
+      - "127.0.0.1:9000:9000" # loopback only
+    volumes:
+      - evalry-objects:/data
 volumes:
   evalry-pg:
+  evalry-objects:

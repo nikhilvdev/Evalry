@@ -8,14 +8,14 @@ from pathlib import Path
 from logquill import bind_context
 from pydantic import BaseModel
 
-from evalry.audit import AuditLog
-from evalry.cache import GradeCache
-from evalry.generation import Generator
-from evalry.graders import DEFAULT_ISOLATION, Isolation
-from evalry.jobs import JobQueue, ProjectLimits
+from evalry.audit.chain import AuditLog
+from evalry.generation.base import Generator
+from evalry.graders.cache import GradeCache
+from evalry.graders.python_tests import DEFAULT_ISOLATION, Isolation
+from evalry.scheduler.jobs import JobQueue, ProjectLimits
+from evalry.scheduler.worker import collect, sandbox_executor, submit_run, work
 from evalry.schemas import RunRecord, Task, load_task
-from evalry.scoring import TaskStats, pass_at_k, task_stats
-from evalry.worker import collect, sandbox_executor, submit_run, work
+from evalry.scoring.stats import TaskStats, pass_at_k, task_stats
 
 
 class TaskSummary(BaseModel):

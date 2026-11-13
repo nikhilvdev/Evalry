@@ -5,9 +5,9 @@ from typing import Literal
 
 import pytest
 
-from evalry.audit import AuditLog
+from evalry.audit.chain import AuditLog
 from evalry.cli import main
-from evalry.gates import Environment, GateDecision, GateException, HardGateRule, decide, verify
+from evalry.gates.hard import Environment, GateDecision, GateException, HardGateRule, decide, verify
 from evalry.schemas import GraderScore, RunRecord, SampleResult
 
 NOW = datetime(2026, 11, 10, tzinfo=UTC)

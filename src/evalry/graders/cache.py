@@ -9,9 +9,9 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from evalry.graders import DEFAULT_ISOLATION, PYTHON_TESTS_VERSION, Isolation
+from evalry.graders.python_tests import DEFAULT_ISOLATION, PYTHON_TESTS_VERSION, Isolation
 from evalry.log import get_logger
-from evalry.runner import PYTHON_IMAGE, SEED
+from evalry.runner.sandbox import PYTHON_IMAGE, SEED
 from evalry.schemas import GraderScore, Task
 
 log = get_logger("cache")

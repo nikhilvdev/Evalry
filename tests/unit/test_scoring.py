@@ -1,8 +1,8 @@
 import pytest
 
-from evalry.compare import Delta, paired_bootstrap, regression_gate
 from evalry.schemas import GraderScore
-from evalry.scoring import composite, pass_at_k, task_stats
+from evalry.scoring.compare import Delta, paired_bootstrap, regression_gate
+from evalry.scoring.stats import composite, pass_at_k, task_stats
 
 
 def gs(name: str, score: float) -> GraderScore:

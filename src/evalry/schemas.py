@@ -56,6 +56,11 @@ class SampleResult(_Strict):
         default=None,
         description="rpc: tests ran in a separate container; inprocess: same process (advisory only).",
     )
+    code_digest: str | None = Field(
+        default=None,
+        description="SHA-256 of the code in object storage. Set when a run is stored with an object store, in which "
+        "case the stored record has an empty `code`; reads put the code back.",
+    )
     dataset_version: str | None = None
     judge_version: str | None = None
 

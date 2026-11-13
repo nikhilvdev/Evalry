@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from evalry.engine import grade
+from evalry.scheduler.engine import grade
 from evalry.schemas import load_task
 
 HERE = Path(__file__).parent

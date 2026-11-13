@@ -1,12 +1,13 @@
 [project]
 name = "evalry"
 version = "0.1.0.dev0"
-description = "Evaluate AI-generated code, eval datasets and the evals themselves."
+description = "Evaluate AI-generated code in a sandbox: hidden tests in a separate container, N-sample suites with pass@k, paired-bootstrap run comparison, signed hard gates, and a multi-tenant API with roles and a hash-chained audit log."
 authors = [
     { name = "Nikhil Arora", email = "nikhil290192@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "boto3>=1.44.0",
     "fastapi>=0.162.3",
     "logquill>=3.0.0",
     "psycopg[binary,pool]>=3.3.8",

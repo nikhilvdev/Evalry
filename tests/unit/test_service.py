@@ -3,14 +3,14 @@ from pathlib import Path
 
 import pytest
 
-from evalry.access import NotFound, PermissionDenied, Principal, Role, ScopedStore, Store
-from evalry.audit import AuditLog
-from evalry.gates import GateDecision, GateException, HardGateRule
-from evalry.generation import FakeGenerator
-from evalry.jobs import Job, JobQueue, ProjectLimits, State
+from evalry.access.service import gate_run, submit_suite
+from evalry.access.store import NotFound, PermissionDenied, Principal, Role, ScopedStore, Store
+from evalry.audit.chain import AuditLog
+from evalry.gates.hard import GateDecision, GateException, HardGateRule
+from evalry.generation.base import FakeGenerator
+from evalry.scheduler.jobs import Job, JobQueue, ProjectLimits, State
+from evalry.scheduler.worker import submit_run, work
 from evalry.schemas import SampleResult, Task, load_task
-from evalry.service import gate_run, submit_suite
-from evalry.worker import submit_run, work
 
 GOLDEN = Path(__file__).parent.parent / "golden"
 GOOD = (GOLDEN / "solutions/good.txt").read_text()

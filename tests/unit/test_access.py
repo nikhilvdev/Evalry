@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from evalry.access import Conflict, NotFound, PermissionDenied, Principal, Role, ScopedStore, Store
-from evalry.audit import AuditLog
-from evalry.backend import Backend
-from evalry.gates import GateDecision
-from evalry.schemas import RunRecord
+from evalry.access.store import Conflict, NotFound, PermissionDenied, Principal, Role, ScopedStore, Store
+from evalry.audit.chain import AuditLog
+from evalry.gates.hard import GateDecision
+from evalry.schemas import RunRecord, Task
+from evalry.storage.backend import Backend
 
 NOW = datetime(2026, 11, 10, tzinfo=UTC)
 
@@ -171,3 +171,29 @@ def test_audit_records_denials_grants_and_writes_with_tenant_and_project(w: Worl
         "run.recorded",
     }
     assert w.audit.verify() == []
+
+
+def tasks(*ids: str) -> list[Task]:
+    return [Task(id=i, language="python", prompt="p", tests="assert True") for i in ids]
+
+
+def test_suites_are_immutable_role_gated_and_tenant_scoped(w: World) -> None:
+    author, viewer = w.as_("acme-author", "acme"), w.as_("acme-viewer", "acme")
+    digest = author.put_suite("app", "v1", tasks("a", "b"))
+    assert len(digest) == 64 and author.list_suites("app") == ["v1"] == viewer.list_suites("app")
+    assert [t.id for t in author.get_suite("app", "v1")] == ["a", "b"]
+    with pytest.raises(Conflict):
+        author.put_suite("app", "v1", tasks("c"))  # a version never changes
+    with pytest.raises(PermissionDenied):
+        viewer.put_suite("app", "v2", tasks("a"))
+    with pytest.raises(PermissionDenied):
+        viewer.get_suite("app", "v1")  # hidden tests are not for viewers
+    other = w.as_("globex-author", "globex")
+    assert other.list_suites("app") == []
+    with pytest.raises(NotFound):
+        other.get_suite("app", "v1")
+    with pytest.raises(ValueError, match="unique"):
+        author.put_suite("app", "v3", tasks("a", "a"))
+    with pytest.raises(ValueError, match="at least one"):
+        author.put_suite("app", "v4", [])
+    assert any(e.action == "suite.created" for e in w.audit.events())

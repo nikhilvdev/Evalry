@@ -8,13 +8,13 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from evalry.audit import AuditLog
-from evalry.cache import GradeCache
-from evalry.engine import run_sample
-from evalry.generation import Generator
-from evalry.graders import DEFAULT_ISOLATION, Isolation
-from evalry.jobs import Job, JobQueue, Priority, Stage, State, job_key
+from evalry.audit.chain import AuditLog
+from evalry.generation.base import Generator
+from evalry.graders.cache import GradeCache
+from evalry.graders.python_tests import DEFAULT_ISOLATION, Isolation
 from evalry.log import get_logger
+from evalry.scheduler.engine import run_sample
+from evalry.scheduler.jobs import Job, JobStore, Priority, Stage, State, job_key
 from evalry.schemas import RunRecord, SampleResult, Task
 
 log = get_logger("worker")
@@ -27,7 +27,7 @@ def task_hash(task: Task) -> str:
 
 
 def submit_run(
-    queue: JobQueue,
+    queue: JobStore,
     tasks: list[Task],
     *,
     project_id: str,
@@ -126,7 +126,7 @@ class _Budget:
 
 
 def _loop(
-    queue: JobQueue, tasks: dict[str, Task], execute: Executor, audit: AuditLog | None, limit: _Budget
+    queue: JobStore, tasks: dict[str, Task], execute: Executor, audit: AuditLog | None, limit: _Budget
 ) -> int:
     done = 0
     while limit.take():
@@ -162,7 +162,7 @@ def _loop(
 
 
 def work(
-    queue: JobQueue,
+    queue: JobStore,
     tasks: dict[str, Task],
     execute: Executor,
     *,
@@ -176,7 +176,7 @@ def work(
     workers than the limit just wait. Threads suffice because each job spends its time waiting on a Docker subprocess.
 
     Only ``Exception`` is caught: a job that raises is retried or failed by the queue. A hard stop (KeyboardInterrupt,
-    process kill) leaves the job RUNNING on purpose; ``JobQueue.recover`` requeues it on the next start.
+    process kill) leaves the job RUNNING on purpose; ``recover`` requeues it on the next start.
     """
     if workers < 1:
         raise ValueError("workers must be at least 1.")
@@ -193,7 +193,7 @@ def work(
 
 
 def collect(
-    queue: JobQueue, jobs: list[Job], *, run_id: str, suite_version: str, started_at: datetime
+    queue: JobStore, jobs: list[Job], *, run_id: str, suite_version: str, started_at: datetime
 ) -> RunRecord:
     """Assemble the run record from finished jobs. Failed or unfinished jobs are an error, never silently dropped."""
     pending = [j for j in jobs if j.state is not State.DONE]

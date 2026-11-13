@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from evalry.audit import AuditLog
+from evalry.audit.chain import AuditLog
 from evalry.cli import main
-from evalry.generation import FakeGenerator
-from evalry.jobs import Job, JobQueue, ProjectLimits, State
+from evalry.generation.base import FakeGenerator
+from evalry.scheduler.jobs import Job, JobQueue, ProjectLimits, State
+from evalry.scheduler.suite import load_suite, run_suite
+from evalry.scheduler.worker import submit_run, work
 from evalry.schemas import RunRecord, SampleResult, Task
-from evalry.suite import load_suite, run_suite
-from evalry.worker import submit_run, work
 
 TASKS = [Task(id=f"t{i}", language="python", prompt="p", tests="t") for i in range(8)]
 BY_ID = {t.id: t for t in TASKS}

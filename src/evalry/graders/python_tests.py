@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from evalry.runner import run_python_tests, run_python_tests_rpc
+from evalry.runner.sandbox import run_python_tests, run_python_tests_rpc
 from evalry.schemas import GraderScore, Task
 
 # "2": hidden tests run out of process by default; a test that cannot be proxied fails closed (score 0).

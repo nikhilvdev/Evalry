@@ -114,12 +114,14 @@ def run_python_tests(
 
 _MAX_LINE = 1 << 20  # one relayed message; a larger line kills the run
 _PKG = Path(__file__).parent
-# Registers evalry._codec inside the container (evalry itself is not installed there), then runs a driver's main().
+# Registers evalry.runner._codec inside the container (evalry itself is not installed there), then runs a driver's main().
 _BOOTSTRAP = (
     "import sys, types\n"
     "_p = types.ModuleType('evalry'); _p.__path__ = []\n"
-    "_c = types.ModuleType('evalry._codec'); exec(CODEC, _c.__dict__)\n"
-    "_p._codec = _c; sys.modules['evalry'] = _p; sys.modules['evalry._codec'] = _c\n"
+    "_r = types.ModuleType('evalry.runner'); _r.__path__ = []\n"
+    "_c = types.ModuleType('evalry.runner._codec'); exec(CODEC, _c.__dict__)\n"
+    "_p.runner = _r; _r._codec = _c\n"
+    "sys.modules.update({'evalry': _p, 'evalry.runner': _r, 'evalry.runner._codec': _c})\n"
 )
 
 

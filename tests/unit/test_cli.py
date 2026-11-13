@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from evalry.cli import main
-from evalry.runner import PYTHON_IMAGE, SEED
+from evalry.runner.sandbox import PYTHON_IMAGE, SEED
 from evalry.schemas import RunRecord
 
 GOLDEN = Path(__file__).parent.parent / "golden"

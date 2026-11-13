@@ -9,7 +9,7 @@ from typing import Any, Protocol
 
 import jwt
 
-from evalry.access import Principal
+from evalry.access.store import Principal
 
 ALGORITHMS = ("RS256", "ES256")
 

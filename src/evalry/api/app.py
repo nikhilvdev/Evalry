@@ -18,7 +18,8 @@ from logquill import bind_context
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, ConfigDict
 
-from evalry.access import (
+from evalry.access.service import gate_run
+from evalry.access.store import (
     AccessError,
     Conflict,
     NotFound,
@@ -29,11 +30,10 @@ from evalry.access import (
     Store,
 )
 from evalry.api.auth import AuthError, TokenVerifier
-from evalry.audit import AuditLog
-from evalry.gates import Environment, GateDecision, GateException, HardGateRule
+from evalry.audit.chain import AuditLog
+from evalry.gates.hard import Environment, GateDecision, GateException, HardGateRule
 from evalry.log import get_logger
-from evalry.schemas import RunRecord
-from evalry.service import gate_run
+from evalry.schemas import RunRecord, Task
 
 log = get_logger("api")
 
@@ -58,6 +58,14 @@ class GrantRole(_Body):
 class GateRequest(_Body):
     rule: HardGateRule
     exceptions: list[GateException] = []
+
+
+class SuiteBody(_Body):
+    tasks: list[Task]
+
+
+class SuiteVersions(_Body):
+    versions: list[str]
 
 
 class RunIds(_Body):
@@ -171,6 +179,21 @@ def create_app(
     @app.get("/v1/projects/{project_id}/runs/{run_id}")
     def get_run(project_id: ProjectId, run_id: SubjectId, scope: Scope) -> RunRecord:
         return scope.get_run(project_id, run_id)
+
+    @app.put("/v1/projects/{project_id}/suites/{version}", status_code=201)
+    def create_suite(
+        project_id: ProjectId, version: SubjectId, body: SuiteBody, scope: Scope
+    ) -> dict[str, str]:
+        """Create an immutable suite version. Hidden tests are in the body, so this and reads need author or higher."""
+        return {"suite_version": version, "content_hash": scope.put_suite(project_id, version, body.tasks)}
+
+    @app.get("/v1/projects/{project_id}/suites")
+    def list_suites(project_id: ProjectId, scope: Scope) -> SuiteVersions:
+        return SuiteVersions(versions=scope.list_suites(project_id))
+
+    @app.get("/v1/projects/{project_id}/suites/{version}")
+    def get_suite(project_id: ProjectId, version: SubjectId, scope: Scope) -> SuiteBody:
+        return SuiteBody(tasks=scope.get_suite(project_id, version))
 
     @app.post("/v1/projects/{project_id}/runs/{run_id}/gate")
     def gate(project_id: ProjectId, run_id: SubjectId, body: GateRequest, scope: Scope) -> GateDecision:

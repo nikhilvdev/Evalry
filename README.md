@@ -3,31 +3,35 @@
 A shared platform for evaluating AI-generated code, the datasets that feed and judge it, and the evals themselves, with
 isolation, audit trails, access control and cost governance.
 
-> **Status: early development.** A local, single-user engine works: grade solutions in a Docker sandbox, run suites with N
-> samples, compare runs. The API, scheduler, storage, auth, real model providers and judges are not built yet.
+> **Status: early development.** Built: local engine and sandbox, scoring and compare, hard gate and CI workflow, multi-tenant
+> API with OIDC, PostgreSQL storage with tenant isolation, audit log, object storage, durable queue, suite registry. Not built:
+> the worker process, live model providers, judges, datasets, SSO login flow, Kubernetes runners.
+
+**Docs:** [What Evalry is](docs/overview.md) | [How to use it](docs/usage.md) (local, CI gate, server, API)
 
 ## What exists
 
 | Module | Purpose |
 | --- | --- |
 | `evalry.schemas` | Version 1 public schemas: task YAML (`Task`, `load_task`) and run record JSON (`RunRecord`, `SampleResult`, `GraderScore`) |
-| `evalry.runner` | Docker sandbox for untrusted code: pinned image, no network, non-root, read-only root, capped CPU/memory/processes. Default `rpc` isolation runs the solution and the hidden tests in separate containers joined by a host relay |
-| `evalry.graders` | `python_tests`: hidden tests run in the sandbox |
-| `evalry.generation` | `Generator` interface, offline `FakeGenerator`, `extract_code`, logged generation calls |
-| `evalry.engine` | `grade` and `run_sample`: the steps shared by the CLI and suite runs |
-| `evalry.cache` | Grading cache keyed by code, tests, grader version, image and seed (`--cache-dir`); timeouts are never cached |
-| `evalry.jobs` | Idempotent jobs keyed by their inputs, in-process priority queue, per-project concurrency and budget limits, retries, crash recovery |
-| `evalry.worker` | `submit_run`, `work`, `collect`: the loop that runs queued jobs through the engine |
-| `evalry.audit` | Append-only, hash-chained audit log (`AuditLog.verify` detects edits, removals and, with a stored head, truncation) |
-| `evalry.gates` | Hard gate: pass/block on deterministic graders for an approved suite version, exceptions with a named approver and expiry, signed decisions recorded in the audit log |
-| `evalry.access` | Roles (viewer/author/approver/admin), tenant and project scoping in one data-access layer; cross-tenant access is structurally impossible and every denial, grant and write is audited |
-| `evalry.service` | Request-level operations behind roles: `submit_suite` (author) and `gate_run` (approver; every exception's named approver must hold the approver role). The local CLI does not go through it |
+| `evalry.runner.sandbox` | Docker sandbox for untrusted code: pinned image, no network, non-root, read-only root, capped CPU/memory/processes. Default `rpc` isolation runs the solution and the hidden tests in separate containers joined by a host relay |
+| `evalry.graders.python_tests` | `python_tests`: hidden tests run in the sandbox |
+| `evalry.generation.base` | `Generator` interface, offline `FakeGenerator`, `extract_code`, logged generation calls |
+| `evalry.scheduler.engine` | `grade` and `run_sample`: the steps shared by the CLI and suite runs |
+| `evalry.graders.cache` | Grading cache keyed by code, tests, grader version, image and seed (`--cache-dir`); timeouts are never cached |
+| `evalry.scheduler.jobs` | Idempotent jobs keyed by their inputs, in-process priority queue, per-project concurrency and budget limits, retries, crash recovery |
+| `evalry.scheduler.worker` | `submit_run`, `work`, `collect`: the loop that runs queued jobs through the engine |
+| `evalry.audit.chain` | Append-only, hash-chained audit log (`AuditLog.verify` detects edits, removals and, with a stored head, truncation) |
+| `evalry.gates.hard` | Hard gate: pass/block on deterministic graders for an approved suite version, exceptions with a named approver and expiry, signed decisions recorded in the audit log |
+| `evalry.access.store` | Roles (viewer/author/approver/admin), tenant and project scoping in one data-access layer; cross-tenant access is structurally impossible and every denial, grant and write is audited |
+| `evalry.access.service` | Request-level operations behind roles: `submit_suite` (author) and `gate_run` (approver; every exception's named approver must hold the approver role). The local CLI does not go through it |
 | `evalry.api` | FastAPI app under `/v1`: OIDC bearer-token verification (RS256/ES256 only), project and member management, run import and read, gate and decision endpoints. State is injected; environment and the gate key are server config |
-| `evalry.backend`, `evalry.pgstore`, `evalry.db` | Storage behind the access layer: in-memory or PostgreSQL (tenant in every key, row-level security, immutable runs and decisions via triggers), plus plain-SQL migrations with checksums |
-| `evalry.suite` | Run every task x N samples; per-task mean/min/max/std and `pass@k` |
-| `evalry.scoring` | Composite score with hard floors, unbiased `pass_at_k`, per-task stats |
-| `evalry.compare` | Seeded paired bootstrap over tasks and the regression gate |
-| `evalry.cost` | Pre-run cost estimate and budget stop; rates are inputs |
+| `evalry.storage` (`backend`, `pgstore`, `db`, `objects`) | Storage behind the access layer: in-memory or PostgreSQL (tenant in every key, row-level security, immutable runs and decisions via triggers), plus plain-SQL migrations with checksums |
+| `evalry.storage` (`objects`, `pgjobs`) | Content-addressed object storage (file or S3-compatible) for run code, and the durable Postgres job queue with leases. Migrations `0003` (jobs) and `0004` (immutable suite registry) |
+| `evalry.scheduler.suite` | Run every task x N samples; per-task mean/min/max/std and `pass@k` |
+| `evalry.scoring.stats` | Composite score with hard floors, unbiased `pass_at_k`, per-task stats |
+| `evalry.scoring.compare` | Seeded paired bootstrap over tasks and the regression gate |
+| `evalry.billing.cost` | Pre-run cost estimate and budget stop; rates are inputs |
 | `evalry.log` | `get_logger`, the only way to log: [LogQuill](https://pypi.org/project/logquill/) with redaction attached |
 
 ## Requirements
@@ -84,7 +88,7 @@ cp deploy/.env.example deploy/.env   # set both passwords; never commit deploy/.
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --wait
 ```
 
-The compose file creates the least-privilege `evalry_app` role (not a superuser, no `BYPASSRLS`). Run `evalry migrate` as the
+The compose file also starts MinIO (object storage). It creates two least-privilege roles, neither a superuser nor `BYPASSRLS`: `evalry_app` (the API, bound to one tenant) and `evalry_worker` (claims queued jobs across tenants; it can read and update the `jobs` table and read `suites`, nothing else). Set `EVALRY_PG_APP_PASSWORD`, `EVALRY_PG_WORKER_PASSWORD`, `EVALRY_S3_ACCESS_KEY` and `EVALRY_S3_SECRET_KEY` in `deploy/.env`. An existing database needs the worker role created by hand. Run `evalry migrate` as the
 admin, then connect the application as `evalry_app`; `PostgresBackend` refuses a superuser connection because PostgreSQL
 superusers bypass row-level security.
 
@@ -109,6 +113,7 @@ uv run evalry-api                                  # binds 127.0.0.1:8000 unless
 | `EVALRY_DB_APP_DSN` | PostgreSQL connection as the least-privilege `evalry_app` role. Required in staging and production |
 | `EVALRY_DB_ADMIN_DSN` | Admin connection, used only by `bootstrap-tenant` |
 | `EVALRY_GATE_KEY` | Signing key for gate decisions. Required in production |
+| `EVALRY_S3_BUCKET`, `EVALRY_S3_ACCESS_KEY`, `EVALRY_S3_SECRET_KEY`, `EVALRY_S3_ENDPOINT` | Object storage for run code. Required in staging and production; dev may use `EVALRY_OBJECT_DIR` instead |
 | dev only | `EVALRY_OIDC_PUBLIC_KEY_FILE` (a PEM instead of a JWKS URL), `EVALRY_DEV_TENANTS=acme:alice,...`, `EVALRY_AUDIT_FILE`. Without a database dev uses the in-memory store and a local audit file |
 
 Every configuration problem is reported at once, and secret values are never printed. Audit events go to one hash chain per
@@ -136,11 +141,4 @@ uv run pytest            # sandbox and Postgres tests need Docker and skip witho
   first, cold call), measured on a laptop.
 - Suite runs can use `--workers N` threads but are not resumable across process restarts; there is no generation cache yet.
 - Budget stops are checked when a job is claimed, so parallel jobs already running can overshoot by up to the number of workers.
-- Running suites through the API waits for the generation service; the API stores, reads and gates run records. `evalry.access` and `evalry.service` are in-memory and not yet behind an API or SSO: roles are assigned in the store, not read from an identity provider,
-  and reads are not audited (denials, grants and writes are).
-- Local comparisons accept any run as the baseline; approved baselines come with the approvals workflow.
-
-## Releases
-
-Tag `v<version>` matching `pyproject.toml`, `evalry.__version__` and a `CHANGELOG.md` heading; the release workflow
-checks all three before publishing.
+- Running suites through the API is not possible yet: the API stores suites and run records and records gates, and the durable queue exists, but the worker process and an enqueue endpoint are not built. SSO is token verification only (no login flow); roles are assigned in the project, not read from the identity provider, and reads are not audited (denials, grants and writes are).

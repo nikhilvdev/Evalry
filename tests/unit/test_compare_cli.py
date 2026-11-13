@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 
 from evalry.cli import main
-from evalry.compare import min_samples, task_means
 from evalry.schemas import RunRecord, SampleResult
+from evalry.scoring.compare import min_samples, task_means
 
 
 def record(scores: dict[str, list[float]], suite: str = "s1") -> RunRecord:

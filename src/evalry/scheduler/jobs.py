@@ -1,8 +1,8 @@
 """Job model and in-process queue (plan §7). One job per task x sample x stage, keyed by its inputs.
 
 Idempotent by construction: submitting a job whose key already exists returns the existing job, and a finished job is never
-executed or charged twice. shortcut: in-memory and single process; a Postgres-backed store replaces ``JobQueue`` behind the
-same methods when the platform needs durability or multiple workers.
+executed or charged twice. This in-memory queue is single process; ``evalry.storage.pgjobs.PostgresJobQueue`` implements the
+same ``JobStore`` methods durably and across workers.
 """
 
 import hashlib
@@ -10,6 +10,7 @@ import json
 import threading
 from enum import IntEnum, StrEnum
 from itertools import count
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -72,6 +73,21 @@ class ProjectLimits(BaseModel):
 
     max_concurrent: int = Field(default=4, ge=1)
     budget_usd: float = Field(default=float("inf"), ge=0)
+
+
+class JobStore(Protocol):
+    """What the worker needs from a queue: ``JobQueue`` (in-process) or ``PostgresJobQueue`` (durable, many workers)."""
+
+    def submit(self, job: Job) -> Job: ...
+    def claim(self) -> Job | None: ...
+    def complete(self, key: str, result: SampleResult) -> None: ...
+    def fail(self, key: str, error: str) -> None: ...
+    def recover(self) -> int: ...
+    def running(self) -> int: ...
+    def jobs(self) -> list[Job]: ...
+    def get(self, key: str) -> Job: ...
+    def spent(self, project_id: str, tenant_id: str = "local") -> float: ...
+    def blocked_by_budget(self, project_id: str, tenant_id: str = "local") -> list[Job]: ...
 
 
 class JobQueue:

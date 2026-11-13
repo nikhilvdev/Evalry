@@ -14,12 +14,16 @@ from dataclasses import dataclass
 import psycopg
 import pytest
 
-from evalry.backend import Backend, MemoryBackend
-from evalry.db import migrate
-from evalry.pgstore import PostgresBackend
+from evalry.storage.backend import Backend, MemoryBackend
+from evalry.storage.db import migrate
+from evalry.storage.pgstore import PostgresBackend
 
 PG_IMAGE = "postgres:16-alpine"
-ADMIN_PASSWORD, APP_PASSWORD = "admin-test-pw", "app-test-pw"  # throwaway container, loopback only
+ADMIN_PASSWORD, APP_PASSWORD, WORKER_PASSWORD = (
+    "admin-test-pw",
+    "app-test-pw",
+    "worker-test-pw",
+)  # throwaway container, loopback only
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,9 @@ def pg_server() -> Iterator[PgServer]:
                     c.execute(
                         f"CREATE ROLE evalry_app LOGIN PASSWORD '{APP_PASSWORD}' NOSUPERUSER NOBYPASSRLS"
                     )
+                    c.execute(
+                        f"CREATE ROLE evalry_worker LOGIN PASSWORD '{WORKER_PASSWORD}' NOSUPERUSER NOBYPASSRLS"
+                    )
                 break
             except psycopg.OperationalError:
                 if time.monotonic() > deadline:
@@ -88,6 +95,10 @@ class PgDb:
     @property
     def app_dsn(self) -> str:
         return self.server.dsn("evalry_app", APP_PASSWORD, self.name)
+
+    @property
+    def worker_dsn(self) -> str:
+        return self.server.dsn("evalry_worker", WORKER_PASSWORD, self.name)
 
 
 @pytest.fixture

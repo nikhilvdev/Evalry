@@ -10,7 +10,7 @@ import os
 import sys
 from typing import Any
 
-from evalry._codec import ProtocolError, Unsupported, decode, encode
+from evalry.runner._codec import ProtocolError, Unsupported, decode, encode
 
 
 def main() -> None:

@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from evalry.audit import GENESIS, AuditLog
-from evalry.jobs import Job, JobQueue
+from evalry.audit.chain import GENESIS, AuditLog
+from evalry.scheduler.jobs import Job, JobQueue
+from evalry.scheduler.worker import submit_run, work
 from evalry.schemas import SampleResult, Task
-from evalry.worker import submit_run, work
 
 TASKS = [Task(id=f"t{i}", language="python", prompt="p", tests="t") for i in range(3)]
 BY_ID = {t.id: t for t in TASKS}

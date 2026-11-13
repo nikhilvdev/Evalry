@@ -1,4 +1,4 @@
-"""Plain-SQL migrations: numbered files in ``evalry/migrations``, applied in order, each in its own transaction.
+"""Plain-SQL migrations: numbered files in ``evalry/storage/migrations``, applied in order, each in its own transaction.
 
 Applied files are recorded with a checksum; if an applied file is later edited, ``migrate`` refuses to continue, because the
 database no longer matches what the file says. An advisory lock stops two deploys migrating at once.

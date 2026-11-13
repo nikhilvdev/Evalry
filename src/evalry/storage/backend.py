@@ -2,11 +2,20 @@
 tenants, so a backend cannot be asked a cross-tenant question. Roles cross this boundary as small ints (viewer=1 ... admin=4).
 """
 
+import hashlib
+import json
 import threading
 from typing import Protocol
 
-from evalry.gates import GateDecision
-from evalry.schemas import RunRecord
+from evalry.gates.hard import GateDecision
+from evalry.schemas import RunRecord, Task
+
+
+def suite_hash(tasks: list[Task]) -> str:
+    """Hash of the exact suite content, in order. A gate can pin this instead of trusting a version label."""
+    return hashlib.sha256(
+        json.dumps([t.model_dump(mode="json") for t in tasks], sort_keys=True).encode()
+    ).hexdigest()
 
 
 class Backend(Protocol):
@@ -33,6 +42,14 @@ class Backend(Protocol):
     def get_run(self, tenant_id: str, project_id: str, run_id: str) -> RunRecord | None: ...
     def list_runs(self, tenant_id: str, project_id: str) -> list[str]: ...
     def put_decision(self, tenant_id: str, project_id: str, decision: GateDecision) -> bool: ...
+    def put_suite(
+        self, tenant_id: str, project_id: str, version: str, tasks: list[Task], created_by: str
+    ) -> str | None:
+        """Store an immutable suite version and return its content hash, or None if the version already exists."""
+        ...
+
+    def get_suite(self, tenant_id: str, project_id: str, version: str) -> list[Task] | None: ...
+    def list_suites(self, tenant_id: str, project_id: str) -> list[str]: ...
     def get_decision(self, tenant_id: str, project_id: str, decision_id: str) -> GateDecision | None: ...
 
 
@@ -46,6 +63,7 @@ class MemoryBackend:
         self._members: dict[tuple[str, str], dict[str, int]] = {}
         self._runs: dict[tuple[str, str, str], RunRecord] = {}
         self._decisions: dict[tuple[str, str, str], GateDecision] = {}
+        self._suites: dict[tuple[str, str, str], list[Task]] = {}
 
     def create_tenant(self, tenant_id: str, admin_subject: str) -> bool:
         with self._lock:
@@ -109,3 +127,22 @@ class MemoryBackend:
     def get_decision(self, tenant_id: str, project_id: str, decision_id: str) -> GateDecision | None:
         with self._lock:
             return self._decisions.get((tenant_id, project_id, decision_id))
+
+    def put_suite(
+        self, tenant_id: str, project_id: str, version: str, tasks: list[Task], created_by: str
+    ) -> str | None:
+        with self._lock:
+            key = (tenant_id, project_id, version)
+            if key in self._suites:
+                return None
+            self._suites[key] = list(tasks)
+            return suite_hash(tasks)
+
+    def get_suite(self, tenant_id: str, project_id: str, version: str) -> list[Task] | None:
+        with self._lock:
+            found = self._suites.get((tenant_id, project_id, version))
+            return None if found is None else list(found)
+
+    def list_suites(self, tenant_id: str, project_id: str) -> list[str]:
+        with self._lock:
+            return sorted(v for (t, p, v) in self._suites if t == tenant_id and p == project_id)

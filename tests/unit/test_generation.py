@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from evalry.engine import run_sample
-from evalry.generation import FakeGenerator, extract_code
+from evalry.generation.base import FakeGenerator, extract_code
+from evalry.scheduler.engine import run_sample
 from evalry.schemas import load_task
 
 GOLDEN = Path(__file__).parent.parent / "golden"

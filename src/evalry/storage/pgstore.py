@@ -12,9 +12,10 @@ import psycopg
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-from evalry.audit import GENESIS, AuditEvent
-from evalry.gates import GateDecision
-from evalry.schemas import RunRecord
+from evalry.audit.chain import GENESIS, AuditEvent
+from evalry.gates.hard import GateDecision
+from evalry.schemas import RunRecord, Task
+from evalry.storage.backend import suite_hash
 
 
 class UnsafeConnection(Exception):
@@ -168,6 +169,43 @@ class PostgresBackend:
                 (tenant_id, project_id, decision_id),
             ).fetchone()
         return None if row is None else GateDecision.model_validate(row[0])
+
+    # -- suites (immutable versions) --------------------------------------------------------------------------------
+
+    def put_suite(
+        self, tenant_id: str, project_id: str, version: str, tasks: list[Task], created_by: str
+    ) -> str | None:
+        digest = suite_hash(tasks)
+        with self._tx(tenant_id) as c:
+            added = c.execute(
+                "INSERT INTO suites (tenant_id, project_id, suite_version, content_hash, tasks, created_by) "
+                "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                (
+                    tenant_id,
+                    project_id,
+                    version,
+                    digest,
+                    Jsonb([t.model_dump(mode="json") for t in tasks]),
+                    created_by,
+                ),
+            ).rowcount
+        return digest if added == 1 else None
+
+    def get_suite(self, tenant_id: str, project_id: str, version: str) -> list[Task] | None:
+        with self._tx(tenant_id) as c:
+            row = c.execute(
+                "SELECT tasks FROM suites WHERE tenant_id = %s AND project_id = %s AND suite_version = %s",
+                (tenant_id, project_id, version),
+            ).fetchone()
+        return None if row is None else [Task.model_validate(t) for t in row[0]]
+
+    def list_suites(self, tenant_id: str, project_id: str) -> list[str]:
+        with self._tx(tenant_id) as c:
+            rows = c.execute(
+                'SELECT suite_version FROM suites WHERE tenant_id = %s AND project_id = %s ORDER BY suite_version COLLATE "C"',
+                (tenant_id, project_id),
+            ).fetchall()
+        return [r[0] for r in rows]
 
 
 class PostgresAuditSink:

@@ -4,9 +4,9 @@ from pathlib import Path
 import pytest
 
 from evalry.cli import main
-from evalry.generation import FakeGenerator
+from evalry.generation.base import FakeGenerator
+from evalry.scheduler.suite import load_suite, run_suite, summarize
 from evalry.schemas import RunRecord, Task
-from evalry.suite import load_suite, run_suite, summarize
 
 GOLDEN = Path(__file__).parent.parent / "golden"
 SUITE = GOLDEN / "suite"
@@ -115,7 +115,7 @@ def test_cli_suite_audit_log_and_budget(tmp_path: Path) -> None:
         "pilot",
     ]
     assert main(args) == 0
-    from evalry.audit import AuditLog
+    from evalry.audit.chain import AuditLog
 
     log = AuditLog(audit)
     actions = [e.action for e in log.events()]

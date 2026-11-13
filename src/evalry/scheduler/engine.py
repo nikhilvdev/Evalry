@@ -2,12 +2,12 @@
 
 import hashlib
 
-from evalry.cache import GradeCache
-from evalry.generation import Generator, extract_code, generate_logged
-from evalry.graders import DEFAULT_ISOLATION, Isolation, python_tests
-from evalry.runner import PYTHON_IMAGE, SEED
+from evalry.generation.base import Generator, extract_code, generate_logged
+from evalry.graders.cache import GradeCache
+from evalry.graders.python_tests import DEFAULT_ISOLATION, Isolation, python_tests
+from evalry.runner.sandbox import PYTHON_IMAGE, SEED
 from evalry.schemas import SampleResult, Task
-from evalry.scoring import composite
+from evalry.scoring.stats import composite
 
 
 def grade(

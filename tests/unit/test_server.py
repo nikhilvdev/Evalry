@@ -14,8 +14,8 @@ from fastapi.testclient import TestClient
 from evalry.api.server import ConfigError, bootstrap_tenant, build_app, build_stores, load_settings
 from evalry.api.server import main as server_main
 from evalry.cli import main as cli_main
-from evalry.pgstore import PostgresBackend
 from evalry.schemas import GraderScore, RunRecord, SampleResult
+from evalry.storage.pgstore import PostgresBackend
 from tests.conftest import PgDb
 
 ISS, AUD = "https://issuer.test", "evalry-api"
@@ -84,7 +84,15 @@ def test_production_and_staging_need_a_database_and_production_needs_a_key(key_f
         load_settings({**base, "EVALRY_ENV": "production"})
     assert "EVALRY_DB_APP_DSN" in str(e.value) and "EVALRY_GATE_KEY" in str(e.value)
     ok = load_settings(
-        {**base, "EVALRY_ENV": "production", "EVALRY_DB_APP_DSN": "host=h", "EVALRY_GATE_KEY": "k"}
+        {
+            **base,
+            "EVALRY_ENV": "production",
+            "EVALRY_DB_APP_DSN": "host=h",
+            "EVALRY_GATE_KEY": "k",
+            "EVALRY_S3_BUCKET": "b",
+            "EVALRY_S3_ACCESS_KEY": "a",
+            "EVALRY_S3_SECRET_KEY": "s",
+        }
     )
     assert (ok.host, ok.port, ok.environment) == (
         "127.0.0.1",

@@ -16,13 +16,14 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 
-from evalry.access import Store
+from evalry.access.store import Store
 from evalry.api.app import create_app
 from evalry.api.auth import JwksKeys, KeyResolver, StaticKeys, TokenVerifier
-from evalry.audit import AuditLog
-from evalry.backend import Backend, MemoryBackend
-from evalry.gates import Environment
-from evalry.pgstore import PostgresAuditSink, PostgresBackend
+from evalry.audit.chain import AuditLog
+from evalry.gates.hard import Environment
+from evalry.storage.backend import Backend, MemoryBackend
+from evalry.storage.objects import FileObjectStore, ObjectStore, S3ObjectStore
+from evalry.storage.pgstore import PostgresAuditSink, PostgresBackend
 
 _ENVIRONMENTS: tuple[str, ...] = ("dev", "staging", "production")
 _TENANT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
@@ -47,6 +48,10 @@ class Settings:
     dev_tenants: tuple[tuple[str, str], ...]
     host: str
     port: int
+    object_dir: Path | None = None
+    s3_bucket: str | None = None
+    s3_endpoint: str | None = None
+    s3_keys: tuple[str, str] | None = None
 
 
 def load_settings(env: Mapping[str, str]) -> Settings:
@@ -86,6 +91,17 @@ def load_settings(env: Mapping[str, str]) -> Settings:
             f"EVALRY_DB_APP_DSN is required in {environment}: the in-memory store is for dev only."
         )
 
+    object_dir, bucket = get("EVALRY_OBJECT_DIR"), get("EVALRY_S3_BUCKET")
+    access_key, secret_key = get("EVALRY_S3_ACCESS_KEY"), get("EVALRY_S3_SECRET_KEY")
+    if object_dir and not is_dev:
+        problems.append("EVALRY_OBJECT_DIR is only allowed when EVALRY_ENV=dev; use EVALRY_S3_BUCKET.")
+    if object_dir and bucket:
+        problems.append("Set EVALRY_OBJECT_DIR or EVALRY_S3_BUCKET, not both.")
+    if environment in ("staging", "production") and not bucket:
+        problems.append(f"EVALRY_S3_BUCKET is required in {environment}: run code is kept in object storage.")
+    if bucket and not (access_key and secret_key):
+        problems.append("EVALRY_S3_ACCESS_KEY and EVALRY_S3_SECRET_KEY are required with EVALRY_S3_BUCKET.")
+
     gate_key = get("EVALRY_GATE_KEY")
     if environment == "production" and not gate_key:
         problems.append("EVALRY_GATE_KEY is required in production: gate decisions must be signed.")
@@ -124,6 +140,10 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         dev_tenants=tuple(dev_tenants),
         host=get("EVALRY_HOST") or "127.0.0.1",
         port=int(port_text),
+        object_dir=Path(object_dir) if object_dir else None,
+        s3_bucket=bucket,
+        s3_endpoint=get("EVALRY_S3_ENDPOINT"),
+        s3_keys=(access_key, secret_key) if bucket and access_key and secret_key else None,
     )
 
 
@@ -144,9 +164,25 @@ def build_stores(settings: Settings) -> tuple[Backend, AuditLog]:
     return MemoryBackend(), AuditLog(settings.audit_file)
 
 
+def build_objects(settings: Settings) -> ObjectStore | None:
+    """S3-compatible bucket, or (dev only) a local directory. None keeps run code inline in the database."""
+    if settings.s3_bucket:
+        import boto3  # type: ignore[import-untyped]  # shortcut: no stubs, upgrade to boto3-stubs if typing matters
+
+        assert settings.s3_keys  # load_settings requires keys with a bucket
+        client = boto3.client(
+            "s3",
+            endpoint_url=settings.s3_endpoint,
+            aws_access_key_id=settings.s3_keys[0],
+            aws_secret_access_key=settings.s3_keys[1],
+        )
+        return S3ObjectStore(client, settings.s3_bucket)
+    return FileObjectStore(settings.object_dir) if settings.object_dir else None
+
+
 def build_app(settings: Settings) -> FastAPI:
     backend, audit = build_stores(settings)
-    store = Store(audit, backend)
+    store = Store(audit, backend, build_objects(settings))
     for (
         tenant,
         admin,

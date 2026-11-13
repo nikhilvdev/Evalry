@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from evalry.runner import run_python_tests
+from evalry.runner.sandbox import run_python_tests
 
 pytestmark = pytest.mark.skipif(
     shutil.which("docker") is None

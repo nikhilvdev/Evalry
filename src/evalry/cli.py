@@ -13,18 +13,18 @@ from pathlib import Path
 import psycopg
 import yaml
 
-from evalry.audit import AuditLog
-from evalry.cache import GradeCache
-from evalry.compare import min_samples, paired_bootstrap, regression_gate, task_means
-from evalry.cost import Rates, check_budget, estimate
-from evalry.db import MigrationError, migrate
-from evalry.engine import grade
-from evalry.gates import GateException, HardGateRule, decide
-from evalry.generation import FakeGenerator
-from evalry.graders import DEFAULT_ISOLATION
+from evalry.audit.chain import AuditLog
+from evalry.billing.cost import Rates, check_budget, estimate
+from evalry.gates.hard import GateException, HardGateRule, decide
+from evalry.generation.base import FakeGenerator
+from evalry.graders.cache import GradeCache
+from evalry.graders.python_tests import DEFAULT_ISOLATION
 from evalry.log import get_logger
+from evalry.scheduler.engine import grade
+from evalry.scheduler.suite import load_suite, run_suite, summarize
 from evalry.schemas import RunRecord, Task, load_task
-from evalry.suite import load_suite, run_suite, summarize
+from evalry.scoring.compare import min_samples, paired_bootstrap, regression_gate, task_means
+from evalry.storage.db import MigrationError, migrate
 
 log = get_logger("cli")
 ISOLATION_HELP = (
@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         help="reuse grading results across runs (keyed by code, tests, grader, image)",
     )
     suite.add_argument(
-        "--rates", type=Path, help="JSON of evalry.cost.Rates; prints the estimate before the run"
+        "--rates", type=Path, help="JSON of evalry.billing.cost.Rates; prints the estimate before the run"
     )
     suite.add_argument(
         "--budget",
@@ -108,8 +108,8 @@ def main(argv: list[str] | None = None) -> int:
         "gate", help="hard gate: decide pass/block for a run record and record the decision"
     )
     gate.add_argument("run", type=Path)
-    gate.add_argument("--rule", type=Path, required=True, help="YAML of evalry.gates.HardGateRule")
-    gate.add_argument("--exceptions", type=Path, help="YAML list of evalry.gates.GateException")
+    gate.add_argument("--rule", type=Path, required=True, help="YAML of evalry.gates.hard.HardGateRule")
+    gate.add_argument("--exceptions", type=Path, help="YAML list of evalry.gates.hard.GateException")
     gate.add_argument("--environment", choices=["dev", "staging", "production"], default="dev")
     gate.add_argument("--project", default="local")
     gate.add_argument("--actor", default=getpass.getuser())
@@ -222,7 +222,7 @@ def _migrate() -> int:
 
 def _bootstrap(args: argparse.Namespace) -> int:
     """Exit 0 = created, 2 = refused. Uses the same environment variables as the server."""
-    from evalry.access import Conflict
+    from evalry.access.store import Conflict
     from evalry.api.server import ConfigError, bootstrap_tenant, load_settings
 
     try:

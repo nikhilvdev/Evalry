@@ -33,6 +33,22 @@
   every tenant table, update/delete triggers making runs and gate decisions immutable, least-privilege grants), `PostgresBackend`
   (refuses superuser connections), checksum-verified plain-SQL migrations, `evalry migrate`, `deploy/docker-compose.yml`.
   The access layer now sits on a `Backend` interface and a decision must reference a stored run. New dependency: psycopg[binary,pool].
+- Object storage (`evalry.objects`): content-addressed (SHA-256) blobs under tenant/project prefixes, ids validated against path
+  escape, reads verified against their digest. `FileObjectStore` for dev, `S3ObjectStore` for S3-compatible services; MinIO added
+  to `deploy/docker-compose.yml`. New dependency: boto3.
+- Durable job queue (`0003_jobs.sql`, `evalry.storage.pgjobs.PostgresJobQueue`): same methods as the in-process queue
+  (`JobStore` protocol, which the worker now accepts), idempotent submit, priority then FIFO, per-project concurrency and budget
+  limits enforced across processes by a claim lock, leases so a dead worker's job is requeued, and a trigger making a done job
+  final. The API role is tenant-bound by row-level security and can only enqueue and read; claiming across tenants needs the new
+  `evalry_worker` role (jobs table only; created in `deploy/postgres-init`, new `EVALRY_PG_WORKER_PASSWORD`). Not yet reachable
+  from the CLI or the API.
+- Suite registry (`0004_suites.sql`, `PUT/GET /v1/projects/{p}/suites/{version}`): a suite version is an immutable task list with
+  a content hash, created by authors and audited. Hidden tests are readable by author or higher only (viewers list versions).
+  Workers read suites across tenants but cannot write them. This is what a worker needs to grade queued jobs.
+- Runs use object storage: with an object store configured, `put_run` writes each sample's code to it and keeps only
+  `SampleResult.code_digest` (new optional field) in the run row; `get_run` puts the code back after the READ role check and
+  fails loudly if an object is missing. Server config: `EVALRY_S3_BUCKET`, `EVALRY_S3_ACCESS_KEY`, `EVALRY_S3_SECRET_KEY`,
+  optional `EVALRY_S3_ENDPOINT` (required in staging and production); dev may use `EVALRY_OBJECT_DIR`.
 - Audit log in PostgreSQL (`0002_audit.sql`, `PostgresAuditSink`): one hash chain per tenant, immutable by trigger, row-level
   security, per-chain advisory lock so several API processes never fork a chain. `AuditLog` now takes a file or a database sink.
 - Server entry point (`evalry-api`, `python -m evalry.api`): settings from environment variables, all problems reported at once

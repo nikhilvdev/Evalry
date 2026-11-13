@@ -3,10 +3,10 @@ from typing import Any
 
 import pytest
 
-import evalry.graders
-from evalry.cache import GradeCache
+import evalry.graders.python_tests as gp
 from evalry.cli import main
-from evalry.engine import grade
+from evalry.graders.cache import GradeCache
+from evalry.scheduler.engine import grade
 from evalry.schemas import GraderScore, Task
 
 T = Task(id="t", language="python", prompt="p", tests="assert f() == 1")
@@ -16,13 +16,13 @@ GOOD = "def f(): return 1"
 @pytest.fixture
 def calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     seen: list[str] = []
-    real = evalry.graders.python_tests
+    real = gp.python_tests
 
     def counting(task: Task, code: str, **kw: Any) -> tuple[GraderScore, bool]:
         seen.append(code)
         return real(task, code, **kw)
 
-    monkeypatch.setattr("evalry.engine.python_tests", counting)
+    monkeypatch.setattr("evalry.scheduler.engine.python_tests", counting)
     return seen
 
 

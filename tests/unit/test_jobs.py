@@ -1,6 +1,6 @@
 import pytest
 
-from evalry.jobs import Job, JobQueue, Priority, ProjectLimits, Stage, State, job_key
+from evalry.scheduler.jobs import Job, JobQueue, Priority, ProjectLimits, Stage, State, job_key
 from evalry.schemas import SampleResult
 
 

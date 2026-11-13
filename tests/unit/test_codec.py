@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from evalry._codec import MAX_DEPTH, ProtocolError, Unsupported, decode, encode
+from evalry.runner._codec import MAX_DEPTH, ProtocolError, Unsupported, decode, encode
 
 
 @pytest.mark.parametrize(

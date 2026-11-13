@@ -6,9 +6,9 @@ from pathlib import Path
 import psycopg
 import pytest
 
-from evalry.access import NotFound, Principal, Store
-from evalry.audit import GENESIS, AuditLog
-from evalry.pgstore import PostgresAuditSink, PostgresBackend
+from evalry.access.store import NotFound, Principal, Store
+from evalry.audit.chain import GENESIS, AuditLog
+from evalry.storage.pgstore import PostgresAuditSink, PostgresBackend
 from tests.conftest import PgDb
 
 

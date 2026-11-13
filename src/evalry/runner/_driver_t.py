@@ -11,7 +11,7 @@ import sys
 import types
 from typing import Any
 
-from evalry._codec import ProtocolError, Unsupported, decode, encode
+from evalry.runner._codec import ProtocolError, Unsupported, decode, encode
 
 MAX_LINE = 1 << 20
 

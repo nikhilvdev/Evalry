@@ -14,10 +14,10 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
-from evalry.access import Store
+from evalry.access.store import Store
 from evalry.api.app import create_app
 from evalry.api.auth import StaticKeys, TokenVerifier
-from evalry.audit import AuditLog
+from evalry.audit.chain import AuditLog
 from evalry.schemas import GraderScore, RunRecord, SampleResult
 
 ISS, AUD = "https://issuer.test", "evalry-api"
@@ -356,3 +356,22 @@ def test_openapi_lists_versioned_routes_and_docs_are_off(env: Env) -> None:
     paths = env.app.openapi()["paths"]
     assert "/v1/projects/{project_id}/runs/{run_id}/gate" in paths and "/healthz" in paths
     assert env.client.get("/docs").status_code == 404
+
+
+def test_suites_over_http(env: Env) -> None:
+    env.setup_project()
+    body = {"tasks": [{"id": "a", "language": "python", "prompt": "p", "tests": "assert True"}]}
+    url = "/v1/projects/app/suites/v1"
+    assert env.client.put(url, json=body, headers=env.h("acme-viewer")).status_code == 403
+    r = env.client.put(url, json=body, headers=env.h("acme-author"))
+    assert r.status_code == 201 and len(r.json()["content_hash"]) == 64
+    assert env.client.put(url, json=body, headers=env.h("acme-author")).status_code == 409
+    assert env.client.get("/v1/projects/app/suites", headers=env.h("acme-viewer")).json() == {
+        "versions": ["v1"]
+    }
+    assert env.client.get(url, headers=env.h("acme-viewer")).status_code == 403  # hidden tests
+    assert env.client.get(url, headers=env.h("acme-author")).json() == {
+        "tasks": [{**body["tasks"][0], "schema_version": "1", "tier": 1, "reference": None, "tags": [],
+                   "sensitivity": "internal", "owner": None}]
+    }  # fmt: skip
+    assert env.client.get(url, headers=env.h("globex-author", "globex")).status_code == 404

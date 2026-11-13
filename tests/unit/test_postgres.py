@@ -8,11 +8,11 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from evalry import db as dbmod
-from evalry.db import MigrationError, migrate
-from evalry.gates import GateDecision
-from evalry.pgstore import PostgresBackend, UnsafeConnection
+from evalry.gates.hard import GateDecision
 from evalry.schemas import GraderScore, RunRecord, SampleResult
+from evalry.storage import db as dbmod
+from evalry.storage.db import MigrationError, migrate
+from evalry.storage.pgstore import PostgresBackend, UnsafeConnection
 from tests.conftest import PgDb
 
 NOW = datetime(2026, 11, 10, 12, 30, 45, 123456, tzinfo=UTC)
@@ -58,7 +58,12 @@ def test_migrate_is_idempotent_and_records_a_checksum(pg_db: PgDb) -> None:
     assert migrate(pg_db.admin_dsn) == []  # the fixture already applied everything
     with psycopg.connect(pg_db.admin_dsn) as c:
         rows = c.execute("SELECT version, length(checksum) FROM schema_migrations").fetchall()
-    assert rows == [("0001_init.sql", 64), ("0002_audit.sql", 64)]
+    assert rows == [
+        ("0001_init.sql", 64),
+        ("0002_audit.sql", 64),
+        ("0003_jobs.sql", 64),
+        ("0004_suites.sql", 64),
+    ]
 
 
 def test_editing_an_applied_migration_is_refused(

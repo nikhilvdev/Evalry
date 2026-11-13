@@ -8,12 +8,12 @@ mode needs no platform); it does not go through here.
 from collections.abc import Callable
 from datetime import datetime
 
-from evalry.access import Action, PermissionDenied, Role, ScopedStore
-from evalry.audit import AuditLog
-from evalry.gates import Environment, GateDecision, GateException, HardGateRule, decide
-from evalry.generation import Generator
+from evalry.access.store import Action, PermissionDenied, Role, ScopedStore
+from evalry.audit.chain import AuditLog
+from evalry.gates.hard import Environment, GateDecision, GateException, HardGateRule, decide
+from evalry.generation.base import Generator
+from evalry.scheduler.suite import run_suite
 from evalry.schemas import RunRecord, Task
-from evalry.suite import run_suite
 
 
 def submit_suite(
