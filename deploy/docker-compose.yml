@@ -2,7 +2,7 @@
 # no backups, no TLS. Passwords come from the environment (see deploy/.env.example); nothing secret is stored in this file.
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663 # pinned by digest; bump deliberately
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${EVALRY_PG_ADMIN_PASSWORD:?set EVALRY_PG_ADMIN_PASSWORD}

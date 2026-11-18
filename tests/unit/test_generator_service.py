@@ -152,7 +152,7 @@ def test_settings_report_every_problem_and_need_explicit_model_and_rates() -> No
         "m",
         10.0,
         "127.0.0.1",
-        {"public", "internal"},
+        frozenset({"public", "internal"}),
     )
     with pytest.raises(ConfigError, match="ALLOWED_SENSITIVITY"):
         load_settings({**ok, "EVALRY_GEN_ALLOWED_SENSITIVITY": "secret"})

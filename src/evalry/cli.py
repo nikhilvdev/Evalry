@@ -32,6 +32,9 @@ from evalry.log import get_logger
 from evalry.monitoring import MonitorReport
 from evalry.monitoring import render_text as render_monitor
 from evalry.repo_tasks import Files, RepoError, pack_snapshot, read_snapshot
+from evalry.runner.nodecheck import render as render_checks
+from evalry.runner.nodecheck import run_node_checks
+from evalry.runner.sandbox import reap_orphans
 from evalry.scheduler.engine import grade
 from evalry.scheduler.jobs import Job
 from evalry.scheduler.suite import load_suite, run_suite, summarize
@@ -146,6 +149,11 @@ def main(argv: list[str] | None = None) -> int:
     wk.add_argument(
         "--isolation", choices=["rpc", "inprocess"], default=DEFAULT_ISOLATION, help=ISOLATION_HELP
     )
+    wk.add_argument(
+        "--require-node-check",
+        action="store_true",
+        help="refuse to start unless the node-check has no failures",
+    )
     wk.add_argument("--once", action="store_true", help="exit when no job is runnable instead of polling")
     wk.add_argument("--poll", type=float, default=2.0, help="seconds to wait when the queue is empty")
     hl = sub.add_parser(
@@ -173,6 +181,20 @@ def main(argv: list[str] | None = None) -> int:
         "--fail-on-finding",
         action="store_true",
         help="exit 1 when offline and production disagree (for cron or CI)",
+    )
+    nc = sub.add_parser(
+        "node-check",
+        help="probe this runner node's real sandbox posture (security review checklist C and H items)",
+    )
+    nc.add_argument("--json", action="store_true", help="print the checks as JSON")
+    nc.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit 1 on warnings too (for a node that must be rootless or use gVisor)",
+    )
+    sub.add_parser(
+        "reap",
+        help="remove sandbox containers whose deadline has passed (orphans of a dead worker); safe to run from cron",
     )
     snap = sub.add_parser(
         "snapshot",
@@ -217,6 +239,12 @@ def main(argv: list[str] | None = None) -> int:
         return _migrate()
     if args.cmd == "worker":
         return _worker(args)
+    if args.cmd == "node-check":
+        return _node_check(args)
+    if args.cmd == "reap":
+        reaped = reap_orphans()
+        print(f"reaped {len(reaped)} orphaned containers" + (f": {', '.join(reaped)}" if reaped else ""))
+        return 0
     if args.cmd == "snapshot":
         return _snapshot(args)
     if args.cmd == "monitor":
@@ -328,6 +356,15 @@ def _worker(args: argparse.Namespace) -> int:
     if args.generator_url and not token:
         print("error: set EVALRY_GEN_TOKEN to the generator service token.", file=sys.stderr)
         return 2
+    if args.require_node_check:
+        failed = [c for c in run_node_checks() if c.status == "fail"]
+        if failed:
+            print(
+                "error: this node does not meet the sandbox requirements:\n"
+                + "\n".join(f"  {c.id} {c.what}: {c.detail}" for c in failed),
+                file=sys.stderr,
+            )
+            return 2
     judge_token = os.environ.get("EVALRY_JUDGE_TOKEN", "")
     if args.judge_url and not judge_token:
         print("error: set EVALRY_JUDGE_TOKEN to the judge service token.", file=sys.stderr)
@@ -390,16 +427,29 @@ def _worker(args: argparse.Namespace) -> int:
         else None,
     )
     try:
+        reap_orphans()  # a worker that died earlier may have left containers behind
         while True:
             done = work(queue, task_for, execute, workers=args.workers)
             if args.once:
                 return 0
             if done == 0:
+                reap_orphans()  # idle is a cheap moment to look
                 time.sleep(args.poll)
     except KeyboardInterrupt:
         return 0
     finally:
         queue.close()
+
+
+def _node_check(args: argparse.Namespace) -> int:
+    """Exit 0 = no failures, 1 = a sandbox guarantee does not hold (or a warning with --strict), 2 = could not run."""
+    checks = run_node_checks()
+    if args.json:
+        print(json.dumps([c.__dict__ for c in checks], indent=2))
+    else:
+        print(render_checks(checks))
+    bad = {"fail", "warn"} if args.strict else {"fail"}
+    return int(any(c.status in bad for c in checks))
 
 
 def _snapshot(args: argparse.Namespace) -> int:

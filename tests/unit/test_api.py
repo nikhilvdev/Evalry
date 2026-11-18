@@ -422,7 +422,7 @@ def test_run_request_flows_from_api_through_a_worker_to_a_stored_run(env: Env) -
             "v1",
             run_id,
         )  # the worker finds the suite from the job alone
-        return Task(**body["tasks"][0])
+        return Task.model_validate(body["tasks"][0])
 
     assert work(env.queue, task_for, fake_result) == 2
     status = env.client.get(f"{base}/run-requests/{run_id}", headers=author).json()
@@ -453,7 +453,7 @@ def test_run_request_reports_a_failed_job_and_unknown_suite(env: Env) -> None:
     def boom(job: Job, task: Task) -> SampleResult:
         raise RuntimeError("provider down")
 
-    work(env.queue, lambda job: Task(**body["tasks"][0]), boom)
+    work(env.queue, lambda job: Task.model_validate(body["tasks"][0]), boom)
     status = env.client.get(f"{base}/run-requests/{run_id}", headers=author).json()
     assert status["state"] == "failed" and "provider down" in status["error"]
     assert (
@@ -488,9 +488,12 @@ def judged_run(env: Env) -> str:
 def test_a_judge_gates_only_after_an_approver_records_a_passing_calibration(env: Env) -> None:
     env.setup_project()
     run_id = judged_run(env)
-    gate = lambda: env.client.post(
-        f"/v1/projects/app/runs/{run_id}/gate", json={"rule": JUDGE_RULE}, headers=env.h("acme-approver")
-    )
+
+    def gate() -> Any:
+        return env.client.post(
+            f"/v1/projects/app/runs/{run_id}/gate", json={"rule": JUDGE_RULE}, headers=env.h("acme-approver")
+        )
+
     refused = gate()
     assert refused.status_code == 403 and "no current passing calibration" in refused.json()["error"]
 
@@ -610,9 +613,12 @@ def test_dispute_workflow_from_blocked_decision_to_exception_and_regate(env: Env
     base = "/v1/projects/app"
     env.client.post(f"{base}/runs", json=two_task_run("r2"), headers=env.h("acme-author"))
     env.client.post(f"{base}/runs", json=run_json("good"), headers=env.h("acme-author"))
-    gate = lambda run, **extra: env.client.post(
-        f"{base}/runs/{run}/gate", json={"rule": RULE, **extra}, headers=env.h("acme-approver")
-    ).json()
+
+    def gate(run: str, **extra: Any) -> Any:
+        return env.client.post(
+            f"{base}/runs/{run}/gate", json={"rule": RULE, **extra}, headers=env.h("acme-approver")
+        ).json()
+
     blocked, passed = gate("r2"), gate("good")
     assert blocked["outcome"] == "block" and passed["outcome"] == "pass"
     d = blocked["decision_id"]

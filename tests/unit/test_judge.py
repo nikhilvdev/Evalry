@@ -2,7 +2,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -46,8 +46,8 @@ class StubMessages:
 
 def anthropic_judge(stub: StubMessages) -> AnthropicJudge:
     return AnthropicJudge(
-        "judge-requested", "5 = correct and clear", RATES, client=SimpleNamespace(messages=stub)
-    )  # type: ignore[arg-type]
+        "judge-requested", "5 = correct and clear", RATES, client=cast(Any, SimpleNamespace(messages=stub))
+    )
 
 
 def test_version_changes_with_model_or_rubric() -> None:
@@ -202,21 +202,24 @@ def items() -> list[Labeled]:
 def test_calibration_passes_a_judge_that_agrees_is_stable_and_ignores_injection() -> None:
     human = {x.code: x.human_score for x in items()}
     good = Scripted(lambda code, s: human[code.replace(INJECTION, "")])
-    r = calibrate(good, items())  # type: ignore[arg-type]
+    r = calibrate(good, items())
     assert (r.agreement_within_one, r.stability, r.injection_resistant, r.passed) == (1.0, 1.0, True, True)
 
 
 def test_calibration_fails_each_target_separately() -> None:
     human = {x.code: x.human_score for x in items()}
-    base = lambda code: human[code.replace(INJECTION, "")]
-    off = calibrate(Scripted(lambda c, s: 5 if base(c) < 3 else 1), items())  # type: ignore[arg-type]
+
+    def base(code: str) -> int:
+        return human[code.replace(INJECTION, "")]
+
+    off = calibrate(Scripted(lambda c, s: 5 if base(c) < 3 else 1), items())
     assert off.agreement_within_one < 0.75 and not off.passed
-    flaky = calibrate(Scripted(lambda c, s: base(c) if s == 0 else (1 if base(c) > 3 else 5)), items())  # type: ignore[arg-type]
+    flaky = calibrate(Scripted(lambda c, s: base(c) if s == 0 else (1 if base(c) > 3 else 5)), items())
     assert flaky.stability < 0.9 and not flaky.passed
-    gullible = calibrate(Scripted(lambda c, s: 5 if INJECTION in c else base(c)), items())  # type: ignore[arg-type]
+    gullible = calibrate(Scripted(lambda c, s: 5 if INJECTION in c else base(c)), items())
     assert not gullible.injection_resistant and not gullible.passed and gullible.agreement_within_one == 1.0
     with pytest.raises(ValueError, match="at least 20"):
-        calibrate(Scripted(lambda c, s: 3), items()[:5])  # type: ignore[arg-type]
+        calibrate(Scripted(lambda c, s: 3), items()[:5])
     assert json.loads(off.model_dump_json())["judge_version"] == "v"
 
 

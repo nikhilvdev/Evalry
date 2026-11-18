@@ -1,26 +1,28 @@
+import urllib.request
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Self, cast
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from pydantic import ValidationError
 
 from evalry import cli, monitoring
-from evalry.monitoring import MIN_SIGNALS, Signal
+from evalry.monitoring import MIN_SIGNALS, Signal, SignalKind
 from tests.unit.test_api import Env, run_json
 
 NOW = datetime(2026, 11, 13, tzinfo=UTC)
 
 
-def sig(i: int, task: str, kind: str = "accepted", days_ago: float = 1) -> Signal:
+def sig(i: int, task: str, kind: SignalKind = "accepted", days_ago: float = 1) -> Signal:
     return Signal(
         signal_id=f"{task}-{i}", task_id=task, kind=kind, observed_at=NOW - timedelta(days=days_ago)
-    )  # type: ignore[arg-type]
+    )
 
 
-def batch(task: str, kinds: list[str]) -> list[Signal]:
-    return [sig(i, task, k) for i, k in enumerate(kinds)]
+def batch(task: str, kinds: Sequence[str]) -> list[Signal]:
+    return [sig(i, task, cast(SignalKind, k)) for i, k in enumerate(kinds)]
 
 
 def compare(
@@ -34,7 +36,7 @@ def compare(
 def test_signals_are_masked_by_schema_there_is_no_room_for_code_or_user_content() -> None:
     for extra in ({"code": "def f(): ..."}, {"user": "alice@example.com"}, {"prompt": "secret"}):
         with pytest.raises(ValidationError):
-            Signal(signal_id="s", task_id="t", kind="accepted", observed_at=NOW, **extra)  # type: ignore[arg-type]
+            Signal(signal_id="s", task_id="t", kind="accepted", observed_at=NOW, **extra)
     with pytest.raises(ValidationError):
         Signal(signal_id="s", task_id="t", kind="liked", observed_at=NOW)  # type: ignore[arg-type]
 
@@ -48,7 +50,7 @@ def test_spearman_handles_ties_direction_and_undefined_cases() -> None:
 
 
 def test_a_task_that_passes_offline_but_fails_in_production_is_a_finding() -> None:
-    failing = batch("t", ["reverted"] * 15 + ["build_failed"] * 5 + ["accepted"] * 2)
+    failing = batch("t", (["reverted"] * 15 + ["build_failed"] * 5 + ["accepted"] * 2))
     r = compare({"t": 1.0, "ok": 1.0}, failing + batch("ok", ["accepted"] * MIN_SIGNALS))
     assert [(f.task_id, f.kind, f.incident_open) for f in r.findings] == [
         ("t", "offline_pass_production_fail", False)
@@ -235,7 +237,7 @@ def test_cli_monitor_prints_and_fails_on_findings_when_asked(
         seen["url"] = req.full_url
         return Resp()
 
-    monkeypatch.setattr(cli.urllib.request, "urlopen", fake_open)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_open)
     argv = ["monitor", "--api", "http://localhost:8000", "--project", "app", "--days", "7"]
     assert cli.main(argv) == 2  # no token
     monkeypatch.setenv("EVALRY_TOKEN", "tok")

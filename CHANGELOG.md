@@ -118,6 +118,34 @@
   `inprocess` isolation because edited code and hidden tests share a container, so they can never hard-gate. Not built: repo
   tasks through the local `evalry suite` command, a grading cache for them, non-Python language profiles beyond what the image
   provides, and deletion edits in the tier 3 reply format.
+- Sandbox hardening from the internal security review (findings F12 and F13). Output: every runner (`run_python_tests`,
+  `run_repo`, the agent's `docker exec`) now reads container output through `run_bounded`, which keeps only the last 10 KB per
+  stream, so a container that floods its output costs the host a fixed amount of memory; sandbox containers also run with
+  `--log-driver none`, because Docker's default log driver stores everything a container prints on disk without a limit. The
+  agent workspace export is time-bounded even if `tar` stalls. Orphans: every sandbox container is labelled `evalry.runner=1`
+  with its own `evalry.deadline`; `evalry reap` (and the worker, at start and while idle) removes containers past their
+  deadline; a tier 3 test container has an in-container watchdog that ends it after the job timeout plus 15 s even if the host
+  died; an agent container ends by itself after its wall limit plus 300 s instead of `sleep 86400`.
+- More sandbox findings from the internal security review. Images: tier 3 and 4 images must be digest-pinned and on an allowlist
+  (`evalry.images`; built-in Python image plus `EVALRY_RUNNER_IMAGES` exact references or registry prefixes), checked when a
+  suite is created and again before any container starts. Limits: every container gets `nofile`, `core` and `fsize` ulimits; at
+  most `EVALRY_MAX_CONTAINERS` (default 16) containers run per worker process, taken all-or-nothing so two-container jobs cannot
+  deadlock; the tier 1 relay stops a side after 100,000 messages. Isolation switches, failing closed when misconfigured:
+  `EVALRY_DOCKER_RUNTIME` (for example `runsc` for gVisor), `EVALRY_SECCOMP_PROFILE`, `EVALRY_APPARMOR_PROFILE`. The generator
+  and judge image bases and Postgres are pinned by digest. Also fixed: test files I added earlier did not pass `mypy src tests`
+  (CI's type check); they now do.
+- Pilot onboarding docs (`docs/pilot/`): an overview with the blocking decisions, roles, timeline and success measures; an
+  operator runbook (stand-up, tenant and roles, worker, node settings, day to day, troubleshooting); a team guide (writing and
+  checking tasks, suites, runs, gates, disputes); and a CI gate guide with two integration shapes. The example task, the Shape A
+  workflow commands and the Shape B script were run against the real CLI, API, worker and sandbox. `docs/usage.md` no longer
+  says `eval-gate.yml` can be called from other repositories: it cannot as written.
+- Remaining security review findings that code can address. Seccomp (F2): a stricter profile is now the default for every
+  sandbox container (Docker's default minus `ptrace`, `process_vm_readv/writev` and `name_to_handle_at`, with `socket()` limited
+  to UNIX and IP families); `EVALRY_SECCOMP_PROFILE=default` or a path overrides it. Runner node (F1): `evalry node-check`
+  probes the node with a container run under the real job flags and checks the daemon's isolation level, socket permissions and
+  image allowlist, each tied to a review checklist item; `evalry worker --require-node-check` refuses to start on a failing node.
+  Images (F14): `deploy/scan-images.sh` scans the sandbox and service images with a digest-pinned Trivy (not yet run). Signing,
+  the MinIO pin, dedicated nodes and per-tenant workers are decisions and infrastructure, not code.
 - Runs use object storage: with an object store configured, `put_run` writes each sample's code to it and keeps only
   `SampleResult.code_digest` (new optional field) in the run row; `get_run` puts the code back after the READ role check and
   fails loudly if an object is missing. Server config: `EVALRY_S3_BUCKET`, `EVALRY_S3_ACCESS_KEY`, `EVALRY_S3_SECRET_KEY`,

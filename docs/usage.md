@@ -1,5 +1,7 @@
 # Using Evalry
 
+Running a pilot with a team? Start at [pilot/README.md](pilot/README.md).
+
 ## 1. Grade locally (no server)
 
 Needs Python 3.12+, [uv](https://docs.astral.sh/uv/) and a running Docker daemon.
@@ -64,14 +66,16 @@ To waive one failing task, pass `--exceptions exc.yaml`, a list of `task_id`, `a
 named in the audit log and the waiver expires.
 
 The repository ships `.github/workflows/eval-gate.yml`: it runs a suite, then the gate. Pull requests record a staging
-rehearsal; pushes to `main` record the production decision using the `EVALRY_GATE_KEY` repository secret. Other repositories can
-call it with `workflow_call`, passing `suite-dir`, `replies`, `rule`, `suite-version` and `project`.
+rehearsal; pushes to `main` record the production decision using the `EVALRY_GATE_KEY` repository secret. It checks out the
+calling repository and runs `uv sync` there, so it works inside this repository; another repository needs a workflow that checks
+out Evalry alongside its own code (see [pilot/ci-gate.md](pilot/ci-gate.md)).
 
 ## 3. Run the server
 
 ```
 cp deploy/.env.example deploy/.env      # set every password and key; never commit it
-docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --wait   # Postgres and MinIO
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --wait postgres minio
+# the file also defines the generator and judge services; they need real keys and a rubric before you start them (pilot/operator-runbook.md)
 
 export EVALRY_ENV=staging
 export EVALRY_DB_APP_DSN='host=... user=evalry_app password=... dbname=evalry'

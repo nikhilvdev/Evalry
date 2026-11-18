@@ -1,4 +1,5 @@
 import json
+import urllib.request
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Self
@@ -202,7 +203,7 @@ def test_cli_health_prints_writes_html_and_sets_exit_code(
         seen["url"], seen["auth"] = req.full_url, req.get_header("Authorization")
         return Resp()
 
-    monkeypatch.setattr(cli.urllib.request, "urlopen", fake_open)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_open)
     base = ["health", "--api", "http://localhost:8000", "--project", "app"]
     assert cli.main(base) == 2  # no token
     monkeypatch.setenv("EVALRY_TOKEN", "tok")

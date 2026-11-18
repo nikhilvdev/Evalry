@@ -84,7 +84,7 @@ def test_hash_seed_is_pinned() -> None:
 # -- repository and agent sandboxes (tiers 3 and 4) ----------------------------------------------------------------------
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from evalry.agent.loop import AgentTurn
 from evalry.generation.base import FakeGenerator
@@ -92,13 +92,13 @@ from evalry.repo_tasks import build_workspace
 from evalry.runner.repo import AgentContainer, run_repo
 from evalry.runner.sandbox import PYTHON_IMAGE
 from evalry.scheduler.engine import run_sample
-from evalry.schemas import Task
+from evalry.schemas import RepoSpec, Task
 
 BUGGY = {"app.py": b"def add(a, b):\n    return a - b\n", "README.md": b"demo"}
 HIDDEN = {
     "tests/test_hidden.py": "import unittest\nimport app\n\n\nclass T(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(app.add(1, 2), 3)\n"
 }
-REPO_SPEC = {
+REPO_SPEC: dict[str, Any] = {
     "snapshot": "c" * 64,
     "commit": "abc1234",
     "image": PYTHON_IMAGE,
@@ -205,7 +205,8 @@ class ScriptedAgent:
             "name": "bash",
             "input": {"command": "python -c 'import app; assert app.add(1, 2) == 3' && echo unittest ok"},
         }
-        content = [[write], [run], [{"type": "text", "text": "fixed"}]][min(self.n, 3) - 1]
+        turns: list[list[dict[str, Any]]] = [[write], [run], [{"type": "text", "text": "fixed"}]]
+        content = turns[min(self.n, 3) - 1]
         return AgentTurn(
             content=content,
             stop_reason="tool_use" if self.n < 3 else "end_turn",
@@ -216,7 +217,7 @@ class ScriptedAgent:
         )
 
 
-def task(tier: int) -> Task:
+def task(tier: Literal[3, 4]) -> Task:
     extra: dict[str, Any] = {"agent": {"max_steps": 6}} if tier == 4 else {}
     return Task(
         id="r",
@@ -224,9 +225,9 @@ def task(tier: int) -> Task:
         tier=tier,
         prompt="add() subtracts",
         tests=json.dumps(HIDDEN),
-        repo=REPO_SPEC,
+        repo=RepoSpec.model_validate(REPO_SPEC),
         **extra,
-    )  # type: ignore[arg-type]
+    )
 
 
 def test_tier_4_end_to_end_agent_edits_in_a_sandbox_and_hidden_tests_grade_it_in_another() -> None:
@@ -251,7 +252,7 @@ def test_tier_4_end_to_end_agent_edits_in_a_sandbox_and_hidden_tests_grade_it_in
                 )
             },
         )(),
-    )  # type: ignore[arg-type]
+    )
     assert lazy.composite == 0.0 and {"tests_failed", "never_ran_tests"} <= set(lazy.agent.failure_categories)  # type: ignore[union-attr]
 
 
@@ -268,3 +269,197 @@ def test_tier_3_end_to_end_model_edits_then_the_repos_tests_decide() -> None:
     assert (
         run_sample(task(3), cheat, 0, snapshot=BUGGY).composite == 0.0
     )  # replacing the hidden tests does not help: they are applied last
+
+
+# -- output flooding and orphaned containers (security review findings F12 and F13) -------------------------------------------
+
+import signal
+import time
+import tracemalloc
+
+from evalry.runner import repo as repo_runner
+from evalry.runner.repo import repo_command
+from evalry.runner.sandbox import reap_orphans
+
+FLOOD = "import sys\nc = b'x' * 65536\nwhile True:\n    sys.stdout.buffer.write(c)\n    sys.stderr.buffer.write(c)"
+
+
+def wait_until_gone(name: str, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not subprocess.run(
+            ["docker", "ps", "-aq", "--filter", f"name=^{name}$"], check=False, capture_output=True, text=True
+        ).stdout.strip():
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def test_a_container_that_floods_its_output_cannot_exhaust_host_memory() -> None:
+    tracemalloc.start()
+    tier1 = run_python_tests(f"exec({FLOOD!r})", PASS, timeout_s=6)
+    repo = run_repo(build_workspace(BUGGY), ["python", "-c", FLOOD], PYTHON_IMAGE, timeout_s=6)
+    with AgentContainer(build_workspace(BUGGY), PYTHON_IMAGE, lifetime_s=120) as ws:
+        agent = ws.exec(["python", "-c", FLOOD], timeout_s=6)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert tier1.timed_out and repo.timed_out and agent.timed_out
+    assert peak < 50 * 1024 * 1024  # seconds of flooding per runner would be gigabytes if buffered
+    assert leftovers() == ""
+
+
+def test_the_output_that_is_kept_is_the_end_where_test_failures_are_reported() -> None:
+    code = (
+        "import sys\nprint('noise ' * 20000)\nsys.stderr.write('Traceback: the real failure\\n')\nsys.exit(1)"
+    )
+    r = run_repo(build_workspace(BUGGY), ["python", "-c", code], PYTHON_IMAGE, timeout_s=30)
+    assert r.exit_code == 1 and "the real failure" in r.stderr and len(r.stdout) <= 10_000
+
+
+def test_an_agent_container_ends_by_itself_when_its_lifetime_is_up() -> None:
+    ws = AgentContainer(build_workspace(BUGGY), PYTHON_IMAGE, lifetime_s=4)
+    ws.__enter__()  # deliberately never closed: this is a worker that died
+    try:
+        assert not wait_until_gone(ws.name, 1)  # still alive early on
+        assert wait_until_gone(ws.name, 25), "the container outlived its lifetime"
+    finally:
+        ws.dead = False
+        ws.close()
+
+
+def test_a_repo_test_container_stops_itself_when_the_host_dies(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(repo_runner, "WATCHDOG_SLACK_S", 1)
+    name = "evalry-r-hostdeath"
+    cmd = repo_command(
+        name, ["python", "-c", "while True: pass"], PYTHON_IMAGE, timeout_s=2
+    )  # watchdog fires at 3 s
+    client = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    assert client.stdin
+    client.stdin.write(build_workspace(BUGGY))
+    client.stdin.close()
+    time.sleep(1.5)
+    assert subprocess.run(
+        ["docker", "ps", "-q", "--filter", f"name=^{name}$"], check=False, capture_output=True, text=True
+    ).stdout.strip()
+    client.send_signal(signal.SIGKILL)  # the worker dies: nothing is left to run docker kill
+    client.wait()
+    try:
+        assert wait_until_gone(name, 25), "the watchdog did not stop the container"
+    finally:
+        subprocess.run(["docker", "kill", name], check=False, capture_output=True)
+
+
+def test_the_reaper_removes_a_real_expired_container_and_leaves_a_live_one() -> None:
+    def start(name: str, deadline: float) -> None:
+        subprocess.run(
+            ["docker", "run", "-d", "--rm", "--name", name, "--label", "evalry.runner=1", "--label", f"evalry.deadline={int(deadline)}",
+             "--network", "none", PYTHON_IMAGE, "sleep", "300"],
+            check=True, capture_output=True,
+        )  # fmt: skip
+
+    start("evalry-orphan-old", time.time() - 60)
+    start("evalry-orphan-live", time.time() + 600)
+    try:
+        assert reap_orphans() == ["evalry-orphan-old"]
+        assert wait_until_gone("evalry-orphan-old", 10)
+        assert not wait_until_gone(
+            "evalry-orphan-live", 1
+        )  # a job still inside its deadline is never touched
+    finally:
+        for n in ("evalry-orphan-old", "evalry-orphan-live"):
+            subprocess.run(["docker", "kill", n], check=False, capture_output=True)
+        wait_until_gone("evalry-orphan-live", 10)
+
+
+def test_reap_command_and_worker_start_clean_up_orphans(capsys: pytest.CaptureFixture[str]) -> None:
+    from evalry import cli
+
+    subprocess.run(
+        ["docker", "run", "-d", "--rm", "--name", "evalry-orphan-cli", "--label", "evalry.runner=1", "--label", "evalry.deadline=1",
+         "--network", "none", PYTHON_IMAGE, "sleep", "300"],
+        check=True, capture_output=True,
+    )  # fmt: skip
+    try:
+        assert cli.main(["reap"]) == 0 and "evalry-orphan-cli" in capsys.readouterr().out
+        assert wait_until_gone("evalry-orphan-cli", 10)
+    finally:
+        subprocess.run(["docker", "kill", "evalry-orphan-cli"], check=False, capture_output=True)
+
+
+# -- the strict seccomp profile (security review F2) ------------------------------------------------------------------------
+
+PTRACE = "import ctypes, os\nlibc = ctypes.CDLL(None, use_errno=True)\nr = libc.ptrace(0, 0, 0, 0)  # PTRACE_TRACEME\nopen('/work/r', 'w').write(str(r))\nassert r != 0, 'ptrace was allowed'"
+NETLINK = "import socket\ns = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0)"
+INET = "import socket\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\ns2 = socket.socketpair()"
+
+
+def test_strict_profile_refuses_ptrace_and_netlink_and_docker_default_allows_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EVALRY_SECCOMP_PROFILE", raising=False)
+    assert run_python_tests(PTRACE, PASS).exit_code == 0  # blocked: the in-container assertion holds
+    assert run_python_tests(NETLINK, PASS).exit_code != 0  # PermissionError creating the socket
+    monkeypatch.setenv("EVALRY_SECCOMP_PROFILE", "default")
+    assert (
+        run_python_tests(PTRACE, PASS).exit_code != 0
+    )  # the control: Docker's default lets the call through
+    assert run_python_tests(NETLINK, PASS).exit_code == 0
+
+
+def test_strict_profile_still_lets_ordinary_programs_run() -> None:
+    assert (
+        run_python_tests(INET, PASS).exit_code == 0
+    )  # INET sockets and socketpair (used by subprocess, asyncio) still work
+    assert (
+        run_python_tests(
+            "import subprocess, sys\nassert subprocess.run([sys.executable, '-c', 'print(1)'], capture_output=True).stdout == b'1\\n'",
+            PASS,
+        ).exit_code
+        == 0
+    )
+    assert (
+        run_python_tests(
+            "import threading\nt = threading.Thread(target=lambda: None)\nt.start()\nt.join()", PASS
+        ).exit_code
+        == 0
+    )
+    r = run_repo(
+        build_workspace(BUGGY, {"app.py": "def add(a, b):\n    return a + b\n"}, HIDDEN),
+        REPO_SPEC["test_command"],
+        PYTHON_IMAGE,
+        timeout_s=60,
+    )
+    assert r.exit_code == 0  # a unittest run of a repo works under the profile
+
+
+# -- the node check against a real node (security review F1) -------------------------------------------------------------------
+
+from evalry.runner import nodecheck
+
+
+def test_the_node_check_passes_on_this_node_with_no_failures() -> None:
+    checks = nodecheck.run_node_checks()
+    assert [c for c in checks if c.status == "fail"] == [], nodecheck.render(checks)
+    assert {"C1", "C2", "C3", "C4", "C5", "C6", "C8", "C9", "C10", "R1", "R3"} <= {
+        c.id for c in checks if c.status == "pass"
+    }
+
+
+def test_the_probe_does_detect_a_weak_container_negative_control() -> None:
+    """The same probe in a container run as root, with capabilities, a writable root, a network and no seccomp must fail checks."""
+    weak = subprocess.run(
+        ["docker", "run", "--rm", "--user", "0:0", "--security-opt", "seccomp=unconfined", "--cap-add", "SYS_PTRACE",
+         PYTHON_IMAGE, "python", "-c", nodecheck.PROBE],
+        check=True, capture_output=True, text=True, timeout=60,
+    )  # fmt: skip
+    failed = {
+        c.id
+        for c in nodecheck.probe_checks(json.loads(weak.stdout.strip().splitlines()[-1]), {})
+        if c.status == "fail"
+    }
+    assert {"C6", "C1", "C3", "C9", "C10", "R3", "R1"} <= failed, (
+        failed
+    )  # root, capabilities, writable root, no seccomp, no limits
+    assert leftovers() == ""

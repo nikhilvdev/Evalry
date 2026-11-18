@@ -3,7 +3,7 @@ import json
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -68,7 +68,7 @@ def test_unsafe_paths_are_rejected(bad: str) -> None:
 
 
 def test_tier_shapes_are_enforced_and_tier_1_serialises_exactly_as_before() -> None:
-    assert repo_task(3).repo == RepoSpec(**REPO) and repo_task(4).agent == AgentSpec(max_steps=5)
+    assert repo_task(3).repo == RepoSpec.model_validate(REPO) and repo_task(4).agent == AgentSpec(max_steps=5)
     for bad in (
         {"tier": 3, "repo": None},  # tier 3 needs a repo
         {"tier": 1},  # tier 1 takes no repo
@@ -251,7 +251,8 @@ class ScriptedAgent:
 
 class FakeWorkspace:
     def __init__(self, timeout_on: str | None = None) -> None:
-        self.dead, self.commands, self.timeout_on = False, [], timeout_on
+        self.dead, self.timeout_on = False, timeout_on
+        self.commands: list[list[str]] = []
 
     def exec(
         self, argv: list[str], *, stdin: bytes | None = None, timeout_s: float = 60, cwd: str = "/work/repo"
@@ -287,7 +288,7 @@ def agent_run(
         ws or FakeWorkspace(),
         spec or AgentSpec(max_steps=10),
         **kwargs,
-    )  # type: ignore[arg-type]
+    )
 
 
 def test_a_clean_run_records_metrics_and_no_failure_categories() -> None:
@@ -352,7 +353,7 @@ def test_a_refusal_ends_the_run() -> None:
         def step(self, system: str, messages: list[dict[str, Any]]) -> AgentTurn:
             return AgentTurn(content=[], stop_reason="refusal", model="m")
 
-    r = run_agent(repo_task(4), Refuses(), FakeWorkspace(), AgentSpec())  # type: ignore[arg-type]
+    r = run_agent(repo_task(4), Refuses(), FakeWorkspace(), AgentSpec())
     assert "model_refused" in r.metrics.failure_categories
 
 
@@ -389,8 +390,8 @@ def test_agent_endpoint_fixes_the_tools_gates_data_and_round_trips() -> None:
     agent = AnthropicAgent(
         "agent-requested",
         Rates(usd_per_mtok_in=2, usd_per_mtok_out=10),
-        client=SimpleNamespace(messages=stub),
-    )  # type: ignore[arg-type]
+        client=cast(Any, SimpleNamespace(messages=stub)),
+    )
     app = create_generator_app(FakeGenerator([]), token=TOKEN, allowed=frozenset({"internal"}), agent=agent)
     c = TestClient(app)
     body = {"system": "s", "messages": [{"role": "user", "content": "fix it"}]}
@@ -407,7 +408,9 @@ def test_agent_endpoint_fixes_the_tools_gates_data_and_round_trips() -> None:
         r = c.post("/v1/agent-step", content=raw, headers=headers)
         return r.status_code, r.content
 
-    turn = RemoteAgent("http://127.0.0.1:8001", TOKEN, post=post).step("s", body["messages"])
+    turn = RemoteAgent("http://127.0.0.1:8001", TOKEN, post=post).step(
+        "s", [{"role": "user", "content": "fix it"}]
+    )
     assert (
         turn.model == "agent-returned"
         and turn.tool_calls[0]["name"] == "bash"

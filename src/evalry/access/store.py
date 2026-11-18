@@ -15,6 +15,7 @@ from enum import IntEnum, StrEnum
 from evalry import disputes, health, labeling, monitoring
 from evalry.audit.chain import AuditLog
 from evalry.gates.hard import GateDecision, GateException
+from evalry.images import check_image
 from evalry.judge.calibration import CalibrationRecord, Labeled, passing_versions
 from evalry.schemas import RunRecord, Task
 from evalry.storage.backend import Backend, MemoryBackend
@@ -262,6 +263,12 @@ class ScopedStore:
             raise ValueError("A suite needs at least one task.")
         if len({t.id for t in tasks}) != len(tasks):
             raise ValueError("Task ids in a suite must be unique.")
+        for t in tasks:
+            if t.repo:
+                try:
+                    check_image(t.repo.image)
+                except ValueError as e:
+                    raise AccessError(f"Task {t.id!r}: {e}") from e
         digest = self._b.put_suite(self._p.tenant_id, project_id, version, tasks, self._p.subject)
         if digest is None:
             raise Conflict(

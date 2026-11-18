@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import pytest
 
@@ -13,7 +14,9 @@ def batch(n: int = 10, share: float = 0.2) -> labeling.LabelBatch:
     return labeling.LabelBatch(batch_id="b", guideline="g", items=items, created_by="x", created_at=T0)
 
 
-def lab(item: int, who: str, score: int, kind: str = "review", at: int = 0) -> Label:
+def lab(
+    item: int, who: str, score: int, kind: Literal["review", "adjudication"] = "review", at: int = 0
+) -> Label:
     return Label(
         batch_id="b",
         item_id=item,
@@ -21,7 +24,7 @@ def lab(item: int, who: str, score: int, kind: str = "review", at: int = 0) -> L
         score=score,
         kind=kind,
         created_at=T0 + timedelta(seconds=at),
-    )  # type: ignore[arg-type]
+    )
 
 
 def test_double_review_share_is_spread_evenly_and_deterministic() -> None:

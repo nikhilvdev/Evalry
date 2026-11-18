@@ -90,7 +90,9 @@ def run_agent_sample(
     from evalry.schemas import GraderScore
 
     assert task.repo and task.agent
-    with AgentContainer(build_workspace(files), task.repo.image) as ws:
+    with AgentContainer(
+        build_workspace(files), task.repo.image, lifetime_s=task.agent.max_wall_s + 300
+    ) as ws:
         run = run_agent(task, agent, ws, task.agent)
         edits = workspace_edits(files, read_export(ws.export())) if not run.workspace_lost else {}
     metrics = run.metrics
