@@ -1,0 +1,60 @@
+name: Eval gate
+
+# Hard gate on deterministic graders only (plan §6, §12 phase 2). Runs the suite with rpc isolation, then records a signed
+# decision. A pull request is a rehearsal (staging, no key needed, so forks work); a push to main is the official
+# production decision and needs the EVALRY_GATE_KEY secret. The job fails when the gate blocks.
+# shortcut: replies are recorded model output; wire a live generator service here once it exists.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      suite-dir: {type: string, default: tests/golden/suite}
+      replies: {type: string, default: tests/golden/gate/replies.json}
+      rule: {type: string, default: tests/golden/gate/rule.yaml}
+      suite-version: {type: string, default: golden-1}
+      project: {type: string, default: evalry}
+    secrets:
+      EVALRY_GATE_KEY:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SUITE_DIR: ${{ inputs.suite-dir || 'tests/golden/suite' }}
+      REPLIES: ${{ inputs.replies || 'tests/golden/gate/replies.json' }}
+      RULE: ${{ inputs.rule || 'tests/golden/gate/rule.yaml' }}
+      SUITE_VERSION: ${{ inputs.suite-version || 'golden-1' }}
+      PROJECT: ${{ inputs.project || 'evalry' }}
+      ENVIRONMENT: ${{ github.event_name == 'pull_request' && 'staging' || 'production' }}
+      EVALRY_GATE_KEY: ${{ secrets.EVALRY_GATE_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install uv
+      - run: uv sync --locked
+      - name: Run the suite in the sandbox
+        run: >
+          uv run evalry suite "$SUITE_DIR" --replies "$REPLIES" --suite-version "$SUITE_VERSION"
+          --project "$PROJECT" --actor "github:${{ github.actor }}" --audit-log audit.jsonl --out run.json
+      - name: Decide the gate
+        run: >
+          uv run evalry gate run.json --rule "$RULE" --environment "$ENVIRONMENT" --project "$PROJECT"
+          --actor "github:${{ github.actor }}" --audit-log audit.jsonl --out decision.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-evidence
+          path: |
+            run.json
+            decision.json
+            audit.jsonl

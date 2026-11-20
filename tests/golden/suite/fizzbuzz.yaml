@@ -1,0 +1,8 @@
+id: fizzbuzz
+language: python
+prompt: Write fizzbuzz(n) returning 'Fizz' for multiples of 3, 'Buzz' for 5, 'FizzBuzz' for both, else str(n).
+tests: |
+  assert fizzbuzz(3) == 'Fizz'
+  assert fizzbuzz(5) == 'Buzz'
+  assert fizzbuzz(15) == 'FizzBuzz'
+  assert fizzbuzz(7) == '7'

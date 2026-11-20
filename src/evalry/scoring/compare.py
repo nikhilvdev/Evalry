@@ -3,6 +3,8 @@
 import random
 from typing import NamedTuple
 
+from evalry.schemas import RunRecord
+
 MIN_TASKS = 100
 MIN_SAMPLES = 5
 
@@ -44,3 +46,18 @@ def regression_gate(delta: Delta, threshold: float, *, n_tasks: int, min_samples
             f"{n_tasks} and {min_samples}. Run the full tier or use an advisory gate."
         )
     return delta.hi < -threshold
+
+
+def task_means(record: RunRecord) -> dict[str, float]:
+    """Mean composite per task over its samples: the paired unit for the bootstrap."""
+    by_task: dict[str, list[float]] = {}
+    for r in record.results:
+        by_task.setdefault(r.task_id, []).append(r.composite)
+    return {t: sum(v) / len(v) for t, v in by_task.items()}
+
+
+def min_samples(record: RunRecord) -> int:
+    counts: dict[str, int] = {}
+    for r in record.results:
+        counts[r.task_id] = counts.get(r.task_id, 0) + 1
+    return min(counts.values(), default=0)
